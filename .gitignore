@@ -31,3 +31,8 @@ sslkeylogfile.log
 coverage.xml
 web/coverage/
 .mypy_cache/
+
+# runtime artifacts
+certs/
+/*.json
+hosts.txt

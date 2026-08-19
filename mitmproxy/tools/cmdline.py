@@ -106,44 +106,8 @@ def common_options(parser, opts):
     opts.make_parser(group, "modify_headers", metavar="PATTERN", short="H")
 
 
-def mitmproxy(opts):
+def mitmgui(opts):
     parser = argparse.ArgumentParser(usage="%(prog)s [options]")
-    common_options(parser, opts)
-
-    opts.make_parser(parser, "console_layout")
-    opts.make_parser(parser, "console_layout_headers")
-    group = parser.add_argument_group(
-        "Filters", "See help in mitmproxy for filter expression syntax."
-    )
-    opts.make_parser(group, "intercept", metavar="FILTER")
-    opts.make_parser(group, "view_filter", metavar="FILTER")
-    return parser
-
-
-def mitmdump(opts):
-    parser = argparse.ArgumentParser(usage="%(prog)s [options] [filter]")
-
-    common_options(parser, opts)
-    opts.make_parser(parser, "flow_detail", metavar="LEVEL")
-    parser.add_argument(
-        "filter_args",
-        nargs="...",
-        help="""
-            Filter expression, equivalent to setting both the view_filter
-            and save_stream_filter options.
-        """,
-    )
-    return parser
-
-
-def mitmweb(opts):
-    parser = argparse.ArgumentParser(usage="%(prog)s [options]")
-
-    group = parser.add_argument_group("Mitmweb")
-    opts.make_parser(group, "web_open_browser")
-    opts.make_parser(group, "web_port", metavar="PORT")
-    opts.make_parser(group, "web_host", metavar="HOST")
-
     common_options(parser, opts)
     group = parser.add_argument_group(
         "Filters", "See help in mitmproxy for filter expression syntax."

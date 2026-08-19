@@ -312,7 +312,17 @@ class Proxyserver(ServerManager):
     def listen_addrs(self) -> list[Address]:
         return [addr for server in self.servers for addr in server.listen_addrs]
 
-    def inject_event(self, event: events.MessageInjected):
+    def abort_flow(self, flow: Flow) -> None:
+        if not flow.killable:
+            return
+        flow.resume()
+        flow.kill()
+        connection_id = flow.client_conn.id
+        connection = self.connections.get(connection_id)
+        if connection is not None:
+            connection.close_connection(connection.client)
+
+    def inject_event(self, event: events.MessageInjected | events.AbortFlow):
         connection_id: str | tuple
         if event.flow.client_conn.transport_protocol != "udp":
             connection_id = event.flow.client_conn.id

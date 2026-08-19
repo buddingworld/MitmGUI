@@ -190,10 +190,15 @@ class HttpStream(layer.Layer):
                 f")"
             )
 
-    @expect(events.Start, HttpEvent)
+    @expect(events.Start, HttpEvent, events.AbortFlow)
     def _handle_event(self, event: events.Event) -> layer.CommandGenerator[None]:
         if isinstance(event, events.Start):
             self.client_state = self.state_wait_for_request_headers
+        elif isinstance(event, events.AbortFlow):
+            self.flow.kill()
+            yield from self.handle_protocol_error(
+                RequestProtocolError(self.stream_id, "killed", ErrorCode.KILL)
+            )
         elif isinstance(event, (RequestProtocolError, ResponseProtocolError)):
             yield from self.handle_protocol_error(event)
         elif isinstance(
@@ -728,6 +733,18 @@ class HttpStream(layer.Layer):
             and self.client_state in (self.state_stream_request_body, self.state_done)
             and self.server_state not in (self.state_done, self.state_errored)
         )
+
+        # The client disconnected after the request was already fully sent
+        # upstream. Instead of aborting the server request, keep it alive so
+        # the response can still be received and captured as usual. Any writes
+        # back to the (already closed) client connection are simply dropped.
+        if (
+            event.code == ErrorCode.CLIENT_DISCONNECTED
+            and is_client_error_but_we_already_talk_upstream
+            and self.client_state == self.state_done
+        ):
+            return
+
         need_error_hook = not (
             self.client_state == self.state_errored
             or self.server_state in (self.state_done, self.state_errored)
@@ -968,8 +985,8 @@ class HttpLayer(layer.Layer):
         elif isinstance(event, events.CommandCompleted):
             stream = self.command_sources.pop(event.command)
             yield from self.event_to_child(stream, event)
-        elif isinstance(event, events.MessageInjected):
-            # For injected messages we pass the HTTP stacks entirely and directly address the stream.
+        elif isinstance(event, (events.MessageInjected, events.AbortFlow)):
+            # For injected messages and aborts, directly address the owning stream.
             try:
                 conn = self.connections[event.flow.server_conn]
             except KeyError:

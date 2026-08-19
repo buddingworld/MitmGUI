@@ -1859,7 +1859,7 @@ if __name__ == "__main__":  # pragma: no cover
 
     import requests
 
-    from mitmproxy.tools.console.common import SYMBOL_MARK
+    SYMBOL_MARK = "\u25cf"
 
     CHAR_MARKERS = list(string.ascii_letters) + list(string.digits)
     EMOJI_SRC = '    ":{name}:": "{emoji_val}",'

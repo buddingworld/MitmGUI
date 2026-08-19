@@ -375,6 +375,17 @@ def format_h2_request_headers(
 
     if event.request.is_http2 or event.request.is_http3:
         hdrs = list(event.request.headers.fields)
+        if not event.request.authority:
+            # HTTP/2 requires :authority.  Derive it from the request host/port
+            # (parsed from the absolute URL), not from the Host header which
+            # may be absent or inconsistent.
+            from mitmproxy.net.http.url import hostport
+            authority_val = hostport(
+                event.request.scheme,
+                event.request.host,
+                event.request.port,
+            )
+            pseudo_headers.append((b":authority", authority_val.encode()))
         if context.options.normalize_outbound_headers:
             yield from normalize_h2_headers(hdrs)
     else:

@@ -44,6 +44,11 @@ from mitmproxy.utils.data import pkg_data
 
 logger = logging.getLogger(__name__)
 
+# How long to keep server-side connections alive after the client has
+# disconnected, so that requests that are already in flight can finish and
+# their responses can still be captured and displayed.
+TRANSPORT_CLOSE_GRACE = 30.0
+
 UDP_TIMEOUT = 20
 
 
@@ -170,6 +175,16 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
         await self.handle_hook(server_hooks.ClientDisconnectedHook(self.client))
 
         if self.transports:
+            # The client is gone, but server-side requests that are already in
+            # flight should still be allowed to finish so that their responses
+            # are captured (see HttpStream.handle_protocol_error). Give the
+            # remaining transports a grace period to complete before they are
+            # force-closed.
+            if any(io.handler for io in self.transports.values()):
+                await asyncio.wait(
+                    [io.handler for io in self.transports.values() if io.handler],
+                    timeout=TRANSPORT_CLOSE_GRACE,
+                )
             self.log("closing transports...", logging.DEBUG)
             for io in self.transports.values():
                 if io.handler:

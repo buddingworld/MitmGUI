@@ -618,11 +618,20 @@ class CertStore:
         self, spec: str, path: Path, passphrase: bytes | None = None
     ) -> None:
         raw = path.read_bytes()
+
+        # PKCS#12 (.p12 / .pfx): load key+cert+chain atomically.
+        if path.suffix.lower() in (".p12", ".pfx"):
+            self._add_p12_cert_file(spec, path, raw, passphrase)
+            return
+
+        # Standard PEM loading.
         cert = Cert.from_pem(raw)
         try:
             private_key = load_pem_private_key(raw, password=passphrase)
+            has_user_key = True
         except ValueError as e:
             private_key = self.default_privatekey
+            has_user_key = False
             if cert.public_key() != private_key.public_key():
                 raise ValueError(
                     f'Unable to find private key in "{path.absolute()}": {e}'
@@ -641,13 +650,87 @@ class CertStore:
             logger.warning(f"Failed to read certificate chain: {e}")
             chain = [cert]
 
-        if cert.is_ca:
+        if cert.is_ca and has_user_key:
+            # Replace the default signing CA with the user-provided one
+            # so that generated per-host certs are trusted by the client.
+            # Do NOT call self.add_cert() — that would register the CA cert
+            # under key "*" in self.certs, and get_cert() would return the CA
+            # cert itself (wrong CN) instead of generating a per-domain leaf.
+            self.default_privatekey = private_key
+            self.default_ca = cert
+            self.default_chain_certs = chain
+            self.default_chain_file = path
+            return
+        elif cert.is_ca and not has_user_key:
             logger.warning(
-                f'"{path.absolute()}" is a certificate authority and not a leaf certificate. '
-                f"This indicates a misconfiguration, see https://docs.mitmproxy.org/stable/concepts-certificates/."
+                f'"{path.absolute()}" is a CA certificate but no private key was found. '
+                f"HTTPS interception may not work as expected."
             )
 
         self.add_cert(CertStoreEntry(cert, private_key, path, chain), spec)
+
+    def _add_p12_cert_file(
+        self, spec: str, path: Path, raw: bytes, passphrase: bytes | None,
+    ) -> None:
+        """Load a PKCS#12 (.p12/.pfx) file with private key and chain."""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"PKCS#12 bundle could not be parsed as DER",
+            )
+            try:
+                private_key, cert, additional_certs = pkcs12.load_key_and_certificates(
+                    raw, passphrase,
+                )
+            except ValueError as e:
+                raise ValueError(
+                    f'Cannot load PKCS#12 file "{path.absolute()}": {e}'
+                ) from e
+
+        if cert is None:
+            raise ValueError(
+                f'No certificate found in PKCS#12 file "{path.absolute()}"'
+            )
+        if private_key is None:
+            raise ValueError(
+                f'No private key found in PKCS#12 file "{path.absolute()}"'
+            )
+
+        mitm_cert = Cert(cert)
+        if mitm_cert.public_key() != private_key.public_key():
+            raise ValueError(
+                f'Public and private keys in "{path.absolute()}" do not match.'
+            )
+
+        chain = [Cert(c) for c in (additional_certs or [])] or [mitm_cert]
+
+        # Write cert chain to a temp PEM file.  pyOpenSSL's
+        # load_verify_locations() and friends only understand PEM,
+        # so we cannot pass the original .p12/.pfx path as chain_file.
+        chain_pem = "".join(c.to_pem().decode() for c in chain).encode()
+        import tempfile
+        fd, chain_path = tempfile.mkstemp(suffix=".pem", prefix="mitmproxy_p12_chain_")
+        os.close(fd)
+        Path(chain_path).write_bytes(chain_pem)
+
+        if mitm_cert.is_ca:
+            # Replace the default signing CA with the user-provided one.
+            # Generated per-host certs will now be signed by this CA,
+            # matching the cert that the client already trusts.
+            # Do NOT call self.add_cert() — see comment in add_cert_file().
+            self.default_privatekey = private_key
+            self.default_ca = mitm_cert
+            self.default_chain_certs = chain
+            self.default_chain_file = Path(chain_path)
+        else:
+            logger.warning(
+                f'"{path.absolute()}" is not a certificate authority. '
+                f"HTTPS interception may not work as expected. "
+                f"See https://docs.mitmproxy.org/stable/concepts-certificates/."
+            )
+            self.add_cert(CertStoreEntry(mitm_cert, private_key, Path(chain_path), chain), spec)
 
     def add_cert(self, entry: CertStoreEntry, *names: str) -> None:
         """

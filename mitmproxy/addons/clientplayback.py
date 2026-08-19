@@ -94,14 +94,16 @@ class ReplayHandler(server.ConnectionHandler):
         if flow.request.scheme == "https":
             context.server.tls = True
             context.server.sni = flow.request.pretty_host
-        if options.mode and options.mode[0].startswith("upstream:"):
+        if flow.server_conn.via:
+            context.server.via = flow.server_conn.via
+        elif options.mode and options.mode[0].startswith("upstream:"):
             mode = UpstreamMode.parse(options.mode[0])
             assert isinstance(mode, UpstreamMode)  # remove once mypy supports Self.
             context.server.via = flow.server_conn.via = (mode.scheme, mode.address)
 
         super().__init__(context)
 
-        if options.mode and options.mode[0].startswith("upstream:"):
+        if flow.server_conn.via or (options.mode and options.mode[0].startswith("upstream:")):
             self.layer = layers.HttpLayer(context, HTTPMode.upstream)
         else:
             self.layer = layers.HttpLayer(context, HTTPMode.transparent)

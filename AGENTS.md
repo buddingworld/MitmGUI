@@ -1,3 +1,5 @@
-- This project uses uv. Always use `uv run pytest` and don't run pytest directly.
-- To run all tests: `uv run tox`.
-- When adding new source files, additionally run: `uv run tox -e individual_coverage -- FILENAME`.
+- This project will be started like "d:\Python314\python -m mitmproxy.tools.main mitmgui“,but you should not use it.
+- Unless specified, all the window created should not be blocking.
+- Don't take screenshot to detect problem.
+- if not specified or for pushing to github, do not use git and uv command.
+- github project: https://github.com/buddingworld/MitmGUI

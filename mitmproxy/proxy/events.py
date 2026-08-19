@@ -130,6 +130,13 @@ class MessageInjected(Event, Generic[T]):
 
 
 @dataclass
+class AbortFlow(Event):
+    """Abort a live flow in its owning proxy connection."""
+
+    flow: flow.Flow
+
+
+@dataclass
 class Wakeup(CommandCompleted):
     """
     Event sent to layers that requested a wakeup using RequestWakeup.

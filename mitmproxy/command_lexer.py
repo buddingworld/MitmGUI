@@ -21,7 +21,7 @@ expr = pyparsing.ZeroOrMore(
     PartialQuotedString
     | pyparsing.Word(" \r\n\t")
     | pyparsing.CharsNotIn("""'" \r\n\t""")
-).leave_whitespace()
+).leaveWhitespace()
 
 
 def quote(val: str) -> str:
