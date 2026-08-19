@@ -15,6 +15,97 @@ from mitmproxy.proxy.layers.http._hooks import HttpConnectUpstreamHook
 from mitmproxy.utils import human
 
 
+class Socks5UpstreamProxy(tunnel.TunnelLayer):
+    def __init__(
+        self,
+        ctx: context.Context,
+        tunnel_conn: connection.Server,
+        auth: tuple[str, str] | None,
+    ):
+        super().__init__(ctx, tunnel_connection=tunnel_conn, conn=ctx.server)
+        self.buf = bytearray()
+        self.auth = auth
+        self.stage = "greeting"
+
+    def start_handshake(self) -> layer.CommandGenerator[None]:
+        methods = b"\x00\x02" if self.auth else b"\x00"
+        yield commands.SendData(
+            self.tunnel_connection, b"\x05" + bytes([len(methods)]) + methods
+        )
+
+    def receive_handshake_data(
+        self, data: bytes
+    ) -> layer.CommandGenerator[tuple[bool, str | None]]:
+        self.buf.extend(data)
+        if self.stage == "greeting":
+            if len(self.buf) < 2:
+                return False, None
+            if self.buf[0] != 5:
+                return False, "SOCKS5 upstream proxy returned an invalid version"
+            method = self.buf[1]
+            del self.buf[:2]
+            if method == 0 and self.auth is None:
+                yield from self._send_connect_request()
+            elif method == 2 and self.auth is not None:
+                username = self.auth[0].encode("utf-8")
+                password = self.auth[1].encode("utf-8")
+                if len(username) > 255 or len(password) > 255:
+                    return False, "SOCKS5 username or password is too long"
+                self.stage = "auth"
+                yield commands.SendData(
+                    self.tunnel_connection,
+                    b"\x01"
+                    + bytes([len(username)])
+                    + username
+                    + bytes([len(password)])
+                    + password,
+                )
+            else:
+                return False, "SOCKS5 upstream proxy authentication failed"
+
+        if self.stage == "auth":
+            if len(self.buf) < 2:
+                return False, None
+            version, status = self.buf[:2]
+            del self.buf[:2]
+            if version != 1 or status != 0:
+                return False, "SOCKS5 upstream proxy authentication failed"
+            yield from self._send_connect_request()
+
+        if self.stage == "connect":
+            if len(self.buf) < 4:
+                return False, None
+            if self.buf[0] != 5:
+                return False, "SOCKS5 upstream proxy returned an invalid version"
+            address_type = self.buf[3]
+            if address_type == 3 and len(self.buf) < 5:
+                return False, None
+            address_length = {1: 4, 3: 1 + self.buf[4], 4: 16}.get(address_type)
+            if address_length is None:
+                return False, "SOCKS5 upstream proxy returned an invalid address type"
+            response_length = 4 + address_length + 2
+            if len(self.buf) < response_length:
+                return False, None
+            reply = self.buf[1]
+            del self.buf[:response_length]
+            if reply != 0:
+                return False, f"SOCKS5 upstream proxy refused connection ({reply})"
+            if self.buf:
+                yield from self.receive_data(bytes(self.buf))
+                self.buf.clear()
+            return True, None
+        return False, None
+
+    def _send_connect_request(self) -> layer.CommandGenerator[None]:
+        host = self.conn.address[0].encode("idna")
+        if len(host) > 255:
+            raise ValueError("Target hostname is too long for SOCKS5")
+        request = b"\x05\x01\x00\x03" + bytes([len(host)]) + host
+        request += self.conn.address[1].to_bytes(2, "big")
+        self.stage = "connect"
+        yield commands.SendData(self.tunnel_connection, request)
+
+
 class HttpUpstreamProxy(tunnel.TunnelLayer):
     buf: ReceiveBuffer
     send_connect: bool
@@ -32,16 +123,19 @@ class HttpUpstreamProxy(tunnel.TunnelLayer):
     def make(cls, ctx: context.Context, send_connect: bool) -> tunnel.LayerStack:
         assert ctx.server.via
         scheme, address = ctx.server.via
-        assert scheme in ("http", "https")
+        assert scheme in ("http", "https", "socks5")
 
-        http_proxy = connection.Server(address=address)
+        upstream_proxy = connection.Server(address=address)
 
         stack = tunnel.LayerStack()
-        if scheme == "https":
-            http_proxy.alpn_offers = tls.HTTP1_ALPNS
-            http_proxy.sni = address[0]
-            stack /= tls.ServerTLSLayer(ctx, http_proxy)
-        stack /= cls(ctx, http_proxy, send_connect)
+        if scheme == "socks5":
+            stack /= Socks5UpstreamProxy(ctx, upstream_proxy, ctx.server.via_auth)
+        else:
+            if scheme == "https":
+                upstream_proxy.alpn_offers = tls.HTTP1_ALPNS
+                upstream_proxy.sni = address[0]
+                stack /= tls.ServerTLSLayer(ctx, upstream_proxy)
+            stack /= cls(ctx, upstream_proxy, send_connect)
 
         return stack
 

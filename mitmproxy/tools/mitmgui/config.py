@@ -38,6 +38,7 @@ class AppConfig:
             "theme": "default",
             "window_geometry": None,  # [x, y, width, height] or None
             "window_maximized": False,
+            "raw_encoding": "utf-8",
         },
         "sendto": [
             {"name": "Fiddler", "address": "http://127.0.0.1:8888"},
@@ -174,6 +175,14 @@ class AppConfig:
     @window_maximized.setter
     def window_maximized(self, val: bool) -> None:
         self._data["settings"]["window_maximized"] = bool(val)
+
+    @property
+    def raw_encoding(self) -> str:
+        return self._data["settings"].get("raw_encoding", "utf-8")
+
+    @raw_encoding.setter
+    def raw_encoding(self, val: str) -> None:
+        self._data["settings"]["raw_encoding"] = val
 
     # ── SendTo ──
 

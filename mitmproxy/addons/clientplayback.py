@@ -96,10 +96,12 @@ class ReplayHandler(server.ConnectionHandler):
             context.server.sni = flow.request.pretty_host
         if flow.server_conn.via:
             context.server.via = flow.server_conn.via
+            context.server.via_auth = flow.server_conn.via_auth
         elif options.mode and options.mode[0].startswith("upstream:"):
             mode = UpstreamMode.parse(options.mode[0])
             assert isinstance(mode, UpstreamMode)  # remove once mypy supports Self.
             context.server.via = flow.server_conn.via = (mode.scheme, mode.address)
+            context.server.via_auth = flow.server_conn.via_auth = mode.auth
 
         super().__init__(context)
 

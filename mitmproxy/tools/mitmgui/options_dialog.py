@@ -501,10 +501,8 @@ class OptionsDialog(QDialog):
 
             proxy = self._gw_manual_edit.text().strip()
             parsed = urlparse(proxy)
-            if parsed.scheme not in ("http", "https"):
-                errors.append(
-                    "Upstream proxy must use http:// or https://. SOCKS5 upstream proxies are not supported."
-                )
+            if parsed.scheme.lower() not in ("http", "https", "socks5"):
+                errors.append("Upstream proxy must use http://, https://, or socks5://.")
             elif not parsed.hostname or not parsed.port:
                 errors.append("Upstream proxy must include a host and port.")
         return errors

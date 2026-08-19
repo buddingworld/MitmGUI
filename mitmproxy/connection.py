@@ -293,6 +293,9 @@ class Server(Connection):
     via: server_spec.ServerSpec | None = None
     """An optional proxy server specification via which the connection should be established."""
 
+    via_auth: tuple[str, str] | None = None
+    """Optional username and password for an upstream proxy."""
+
     def __str__(self):
         if self.alpn:
             tls_state = f", alpn={self.alpn.decode(errors='replace')}"

@@ -1,6 +1,7 @@
 import base64
 import binascii
 import ctypes
+import difflib
 import fnmatch
 import json as json_mod
 import math
@@ -72,7 +73,7 @@ from mitmproxy.tools.mitmgui.config import AppConfig
 from mitmproxy.tools.mitmgui.master import MitmGuiMaster
 from mitmproxy.tools.mitmgui.session_list import SessionTableModel
 
-ENCODINGS = ["utf-8", "gbk"]
+ENCODINGS = ["utf-8", "gbk", "latin-1"]
 DEFAULT_ENCODING = "utf-8"
 
 # Themes with a dark chrome; the window frame adapts its colors accordingly
@@ -272,6 +273,59 @@ def _decode_bytes(content: bytes | None, encoding: str = DEFAULT_ENCODING) -> st
     if not content:
         return ""
     return content.decode(encoding, errors="replace").replace("\ufffd", "??")
+
+
+def _normalize_newlines_with_map(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Normalize \\r\\n / \\r / \\n to \\n the way QPlainTextEdit does,
+    while recording which slice of the original text each normalized
+    character came from."""
+    norm: list[str] = []
+    char_map: list[tuple[int, int]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "\r":
+            if i + 1 < n and text[i + 1] == "\n":
+                norm.append("\n")
+                char_map.append((i, i + 2))
+                i += 2
+            else:
+                norm.append("\n")
+                char_map.append((i, i + 1))
+                i += 1
+        else:
+            norm.append(c)
+            char_map.append((i, i + 1))
+            i += 1
+    return "".join(norm), char_map
+
+
+def _merge_edited_bytes(displayed: str, edited: str, encoding: str) -> bytes:
+    """Merge edited Raw text back into bytes without rewriting untouched
+    line endings.
+
+    ``displayed`` is the text that was loaded into the editor (it still
+    carries the original \\r\\n / \\r / \\n line endings). ``edited`` is what
+    QPlainTextEdit.toPlainText() returns, where every line ending has been
+    collapsed to \\n by Qt. Only the regions the user actually changed are
+    encoded from ``edited``; untouched regions are taken from ``displayed``
+    so their original newline bytes survive.
+    """
+    norm_displayed, char_map = _normalize_newlines_with_map(displayed)
+    if norm_displayed == edited:
+        # Nothing was changed: reproduce the original bytes as-is.
+        return displayed.encode(encoding, errors="replace")
+    out: list[str] = []
+    matcher = difflib.SequenceMatcher(None, norm_displayed, edited, autojunk=False)
+    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
+        if tag == "equal":
+            for k in range(old_start, old_end):
+                s, e = char_map[k]
+                out.append(displayed[s:e])
+        else:
+            out.append(edited[new_start:new_end])
+    return "".join(out).encode(encoding, errors="replace")
 
 
 def _try_format_json(content: bytes | None) -> str:
@@ -1005,8 +1059,10 @@ class InspectorPanel(QWidget):
         super().__init__(parent)
         self._panel_type = panel_type
         self._current_flow = None
-        self._encoding = DEFAULT_ENCODING
+        config = AppConfig()
+        self._encoding = config.raw_encoding if config.raw_encoding in ENCODINGS else DEFAULT_ENCODING
         self._text_widgets: dict[str, QPlainTextEdit] = {}
+        self._raw_display_body = ""
         self._image_widget: _ImageViewWidget | None = None
         self._web_view: QWebEngineView | None = None
         self._webforms_widget: _WebFormsWidget | None = None
@@ -1119,6 +1175,11 @@ class InspectorPanel(QWidget):
             safe_content = None
 
         if tab_name == "Raw":
+            try:
+                raw_body_bytes = req.content
+            except ValueError:
+                raw_body_bytes = None
+            self._raw_display_body = _decode_bytes(raw_body_bytes, enc)
             self.set_content("Raw", _format_request_raw(flow, enc))
         elif tab_name == "Headers":
             status_line = f"{req.method} {req.path} {req.http_version}"
@@ -1149,6 +1210,11 @@ class InspectorPanel(QWidget):
             safe_content = None
 
         if tab_name == "Raw":
+            try:
+                raw_body_bytes = resp.content
+            except ValueError:
+                raw_body_bytes = None
+            self._raw_display_body = _decode_bytes(raw_body_bytes, enc)
             self.set_content("Raw", _format_response_raw(flow, enc))
         elif tab_name == "Headers":
             status_line = f"{resp.http_version} {resp.status_code} {resp.reason}"
@@ -1218,6 +1284,9 @@ class InspectorPanel(QWidget):
     def _set_encoding(self, encoding: str) -> None:
         if encoding != self._encoding:
             self._encoding = encoding
+            config = AppConfig()
+            config.raw_encoding = encoding
+            config.save()
             if self._current_flow:
                 if self._panel_type == "request":
                     self.populate_request(self._current_flow)
@@ -1229,6 +1298,7 @@ class InspectorPanel(QWidget):
             w = self._text_widgets[tab_name]
             if w.toPlainText() != text:
                 w.setPlainText(text)
+            w.document().setModified(False)
 
     def set_editable(self, editable: bool) -> None:
         """Toggle read-only state for all text widgets and WebForms tables."""
@@ -1293,7 +1363,7 @@ class InspectorPanel(QWidget):
             ct = req.headers.get("content-type", "").lower()
             if "x-www-form-urlencoded" in ct:
                 try:
-                    body = raw_body.decode("utf-8", errors="replace").replace("\ufffd", "??")
+                    body = raw_body.decode(self._encoding, errors="replace").replace("\ufffd", "??")
                     body_qs = parse_qs(body, keep_blank_values=True)
                     for k, vals in body_qs.items():
                         for v in vals:
@@ -1341,7 +1411,7 @@ class InspectorPanel(QWidget):
         # body when edits are saved (e.g. during Replay And Edit).
         current_ct = (req.headers.get("content-type", "") or "").lower()
         if body_pairs:
-            body = urlencode(body_pairs).encode("utf-8")
+            body = urlencode(body_pairs).encode(self._encoding)
             req.content = body
             req.headers[b"content-type"] = b"application/x-www-form-urlencoded"
         elif "x-www-form-urlencoded" in current_ct:
@@ -1363,7 +1433,7 @@ class InspectorPanel(QWidget):
 
         # ── 1. Apply Raw tab edits (method, URL, headers, body) ──
         raw_text = self._text_widgets.get("Raw")
-        if raw_text:
+        if raw_text and raw_text.document().isModified():
             raw_str = raw_text.toPlainText()
             if raw_str:
                 lines = raw_str.split("\n")
@@ -1437,23 +1507,14 @@ class InspectorPanel(QWidget):
                     or hostport(req.scheme, req.host, req.port)
                 )
 
-                # Body is everything after the empty line
+                # Body is everything after the empty line.  Merge the edited
+                # text back into the original bytes so line endings the user
+                # did not touch are preserved exactly (see _merge_edited_bytes).
                 if header_end > 0 and header_end + 1 < len(lines):
                     body = "\n".join(lines[header_end + 1:])
-                    # Qt's toPlainText() normalises \r\n → \n on all
-                    # platforms, stripping carriage returns.  Normalise
-                    # any residual platform line endings first, then
-                    # restore CRLF for multipart bodies which MUST use
-                    # \r\n per RFC 2046.
-                    body = body.replace("\r\n", "\n").replace("\r", "\n")
-                    body_bytes = body.encode("utf-8")
-                    ct = (req.headers.get("content-type", "") or "").lower()
-                    if "multipart" in ct and body_bytes:
-                        body_bytes = body_bytes.replace(b"\n", b"\r\n")
-                        # Ensure body ends with CRLF so the closing
-                        # boundary is properly terminated per RFC 2046.
-                        if not body_bytes.endswith(b"\r\n"):
-                            body_bytes += b"\r\n"
+                    body_bytes = _merge_edited_bytes(
+                        self._raw_display_body or "", body, self._encoding
+                    )
                     req.content = body_bytes
 
         # ── 2. Apply WebForms tab edits (query / body override Raw values) ──
@@ -1511,7 +1572,9 @@ class InspectorPanel(QWidget):
         # Body is everything after the empty line
         if header_end > 0 and header_end + 1 < len(lines):
             body = "\n".join(lines[header_end + 1:])
-            resp.content = body.encode("utf-8")
+            resp.content = _merge_edited_bytes(
+                self._raw_display_body or "", body, self._encoding
+            )
 
         # Refresh all tabs from the updated flow
         if flow.response:

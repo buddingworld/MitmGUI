@@ -109,6 +109,7 @@ class GetHttpConnection(HttpCommand):
     tls: bool
     via: server_spec.ServerSpec | None
     transport_protocol: TransportProtocol = "tcp"
+    via_auth: tuple[str, str] | None = None
 
     def __hash__(self):
         return id(self)
@@ -119,6 +120,7 @@ class GetHttpConnection(HttpCommand):
             and self.address == connection.address
             and self.tls == connection.tls
             and self.via == connection.via
+            and self.via_auth == connection.via_auth
             and self.transport_protocol == connection.transport_protocol
         )
 
@@ -777,6 +779,7 @@ class HttpStream(layer.Layer):
             self.flow.request.scheme == "https",
             self.flow.server_conn.via,
             self.flow.server_conn.transport_protocol,
+            via_auth=self.flow.server_conn.via_auth,
         )
         if err:
             yield from self.handle_protocol_error(
@@ -982,6 +985,7 @@ class HttpLayer(layer.Layer):
                 proxy_mode = self.context.client.proxy_mode
                 assert isinstance(proxy_mode, UpstreamMode)
                 self.context.server.via = (proxy_mode.scheme, proxy_mode.address)
+                self.context.server.via_auth = proxy_mode.auth
         elif isinstance(event, events.CommandCompleted):
             stream = self.command_sources.pop(event.command)
             yield from self.event_to_child(stream, event)
@@ -1141,6 +1145,9 @@ class HttpLayer(layer.Layer):
 
             if event.via:
                 context.server.via = event.via
+                context.server.via_auth = (
+                    event.via_auth or self.context.server.via_auth
+                )
                 # We always send a CONNECT request, *except* for plaintext absolute-form HTTP requests in upstream mode.
                 send_connect = event.tls or self.mode != HTTPMode.upstream
                 stack /= _upstream_proxy.HttpUpstreamProxy.make(context, send_connect)
