@@ -39,6 +39,8 @@ class AppConfig:
             "window_geometry": None,  # [x, y, width, height] or None
             "window_maximized": False,
             "raw_encoding": "utf-8",
+            "raw_font_zoom": -2,  # QScintilla zoom level for Raw / New Session
+            "raw_word_wrap": True,  # Word Wrap for Raw editors (on by default)
         },
         "sendto": [
             {"name": "Fiddler", "address": "http://127.0.0.1:8888"},
@@ -178,11 +180,33 @@ class AppConfig:
 
     @property
     def raw_encoding(self) -> str:
-        return self._data["settings"].get("raw_encoding", "utf-8")
+        # Keep reading the key used by older mitmgui builds so an existing
+        # encoding choice is not lost after upgrading.
+        settings = self._data["settings"]
+        return settings.get("raw_encoding", settings.get("encoding", "utf-8"))
 
     @raw_encoding.setter
     def raw_encoding(self, val: str) -> None:
         self._data["settings"]["raw_encoding"] = val
+        # Remove the legacy key once the setting is saved under its current
+        # name, avoiding two competing defaults in Config.json.
+        self._data["settings"].pop("encoding", None)
+
+    @property
+    def raw_font_zoom(self) -> int:
+        return int(self._data["settings"].get("raw_font_zoom", -2))
+
+    @raw_font_zoom.setter
+    def raw_font_zoom(self, val: int) -> None:
+        self._data["settings"]["raw_font_zoom"] = int(val)
+
+    @property
+    def raw_word_wrap(self) -> bool:
+        return bool(self._data["settings"].get("raw_word_wrap", True))
+
+    @raw_word_wrap.setter
+    def raw_word_wrap(self, val: bool) -> None:
+        self._data["settings"]["raw_word_wrap"] = bool(val)
 
     # ── SendTo ──
 

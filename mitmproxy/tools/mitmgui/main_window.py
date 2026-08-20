@@ -1,7 +1,6 @@
 import base64
 import binascii
 import ctypes
-import difflib
 import fnmatch
 import json as json_mod
 import math
@@ -23,7 +22,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QThread, pyqtSignal, QObject, QByteArray, QSortFilterProxyModel, QRegularExpression
-from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QTextCursor
+from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -65,6 +64,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage
+from PyQt6.Qsci import QsciScintilla, QsciScintillaBase
 
 from mitmproxy import http, options
 from mitmproxy.tools import cmdline
@@ -273,59 +273,6 @@ def _decode_bytes(content: bytes | None, encoding: str = DEFAULT_ENCODING) -> st
     if not content:
         return ""
     return content.decode(encoding, errors="replace").replace("\ufffd", "??")
-
-
-def _normalize_newlines_with_map(text: str) -> tuple[str, list[tuple[int, int]]]:
-    """Normalize \\r\\n / \\r / \\n to \\n the way QPlainTextEdit does,
-    while recording which slice of the original text each normalized
-    character came from."""
-    norm: list[str] = []
-    char_map: list[tuple[int, int]] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        c = text[i]
-        if c == "\r":
-            if i + 1 < n and text[i + 1] == "\n":
-                norm.append("\n")
-                char_map.append((i, i + 2))
-                i += 2
-            else:
-                norm.append("\n")
-                char_map.append((i, i + 1))
-                i += 1
-        else:
-            norm.append(c)
-            char_map.append((i, i + 1))
-            i += 1
-    return "".join(norm), char_map
-
-
-def _merge_edited_bytes(displayed: str, edited: str, encoding: str) -> bytes:
-    """Merge edited Raw text back into bytes without rewriting untouched
-    line endings.
-
-    ``displayed`` is the text that was loaded into the editor (it still
-    carries the original \\r\\n / \\r / \\n line endings). ``edited`` is what
-    QPlainTextEdit.toPlainText() returns, where every line ending has been
-    collapsed to \\n by Qt. Only the regions the user actually changed are
-    encoded from ``edited``; untouched regions are taken from ``displayed``
-    so their original newline bytes survive.
-    """
-    norm_displayed, char_map = _normalize_newlines_with_map(displayed)
-    if norm_displayed == edited:
-        # Nothing was changed: reproduce the original bytes as-is.
-        return displayed.encode(encoding, errors="replace")
-    out: list[str] = []
-    matcher = difflib.SequenceMatcher(None, norm_displayed, edited, autojunk=False)
-    for tag, old_start, old_end, new_start, new_end in matcher.get_opcodes():
-        if tag == "equal":
-            for k in range(old_start, old_end):
-                s, e = char_map[k]
-                out.append(displayed[s:e])
-        else:
-            out.append(edited[new_start:new_end])
-    return "".join(out).encode(encoding, errors="replace")
 
 
 def _try_format_json(content: bytes | None) -> str:
@@ -749,6 +696,191 @@ class _FrameOverlay(QWidget):
         p.drawRect(r)
 
 
+class _ScintillaTextEdit(QsciScintilla):
+    """QsciScintilla-based editor used by the Raw tab and the New Session
+    dialog.
+
+    Unlike QPlainTextEdit, QScintilla preserves the line endings that were
+    loaded into it (CRLF stays CRLF, LF stays LF), so editing a raw HTTP
+    message never rewrites the untouched line breaks of the original packet.
+    """
+
+    def __init__(self, inspector_panel: "InspectorPanel | None" = None):
+        super().__init__()
+        self._inspector = inspector_panel
+        self.setReadOnly(True)
+        self.setUtf8(True)
+        # Word Wrap is user-configurable and persisted in the config file
+        # (enabled by default).
+        config = AppConfig()
+        self.setWrapMode(
+            QsciScintilla.WrapMode.WrapWord
+            if config.raw_word_wrap
+            else QsciScintilla.WrapMode.WrapNone
+        )
+        # Hide the Scintilla margin strip (no line numbers / fold markers),
+        # which otherwise shows as a gray block on the left.
+        for margin in range(5):
+            self.setMarginWidth(margin, 0)
+        # Placeholder text (QScintilla has no native placeholder widget).
+        self._placeholder_label = QLabel(self.viewport())
+        self._placeholder_label.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        self._placeholder_label.setStyleSheet(
+            "color: #9AA0A6; background: transparent; border: none; padding: 4px;"
+        )
+        self._placeholder_label.hide()
+        self.textChanged.connect(self._update_placeholder)
+        # Persist the zoom level (changed via Ctrl + mouse wheel) so the
+        # editor re-opens with the user's preferred font size.
+        self.SCN_ZOOM.connect(self._save_zoom)
+        # Colour the editor area to match the current application theme.
+        self.apply_theme(AppConfig().theme)
+
+    def apply_theme(self, theme_id: str) -> None:
+        """Colour and font the Scintilla editor area to follow the active
+        theme.
+
+        QScintilla paints its own background and does not pick up fonts from
+        the application QSS, so both the colours and the font are applied
+        programmatically here.
+        """
+        bg, fg, sel_bg, sel_fg = themes.EDITOR_COLORS.get(
+            theme_id, themes.EDITOR_COLORS[themes.DEFAULT_THEME]
+        )
+        self.setPaper(QColor(bg))
+        self.setColor(QColor(fg))
+        self.setSelectionBackgroundColor(QColor(sel_bg))
+        self.setSelectionForegroundColor(QColor(sel_fg))
+        self.setCaretForegroundColor(QColor(fg))
+        family, size = themes.THEME_FONTS.get(
+            theme_id, themes.THEME_FONTS[themes.DEFAULT_THEME]
+        )
+        if size > 0:
+            font = QFont(family)
+            # The themed QSS also sets the QsciScintilla font and QSS wins
+            # over setFont(), so this point size only matters as a fallback
+            # when a theme's stylesheet does not override the font.
+            font.setPointSize(size)
+        else:
+            font = QFont(QApplication.font())
+        self.setFont(font)
+        # Apply the persisted zoom level (absolute, so re-applying the theme
+        # does not stack with the previous zoom).
+        self.SendScintilla(
+            QsciScintillaBase.SCI_SETZOOM, AppConfig().raw_font_zoom
+        )
+
+    # ── QPlainTextEdit-compatible API used by InspectorPanel ──
+
+    def toPlainText(self) -> str:
+        return self.text()
+
+    def setPlainText(self, text: str) -> None:
+        self.setText(text)
+
+    def document(self):
+        """Return self so existing callers can use
+        ``document().isModified()`` / ``document().setModified(...)``."""
+        return self
+
+    def setPlaceholderText(self, text: str) -> None:
+        self._placeholder_label.setText(text)
+        self._update_placeholder()
+
+    def find_first(self, pattern: str, use_regex: bool) -> bool:
+        """Search forward from the current cursor position; when the end of
+        the document is reached, wrap around to the top (mirrors the previous
+        QPlainTextEdit-based find behaviour)."""
+        line, index = self.getCursorPosition()
+        if self.findFirst(
+            pattern, use_regex, False, False, False, True, line, index, False
+        ):
+            return True
+        self.setCursorPosition(0, 0)
+        return self.findFirst(pattern, use_regex, False, False, False, True, 0, 0, False)
+
+    # ── placeholder overlay ──
+
+    def _update_placeholder(self) -> None:
+        self._placeholder_label.setVisible(self.text() == "")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._placeholder_label.adjustSize()
+        self._placeholder_label.move(4, 4)
+
+    # ── right-click menu: encoding + Word Wrap ──
+
+    def contextMenuEvent(self, event) -> None:
+        menu = self.createStandardContextMenu()
+        if self._inspector is not None:
+            self._inspector.add_encoding_menu(menu)
+        menu.addSeparator()
+        wrap_action = menu.addAction("Word Wrap")
+        wrap_action.setCheckable(True)
+        wrap_action.setChecked(self.wrapMode() != QsciScintilla.WrapMode.WrapNone)
+        wrap_action.triggered.connect(self._toggle_word_wrap)
+        paste_action = menu.addAction("Paste From File")
+        paste_action.setEnabled(not self.isReadOnly())
+        paste_action.triggered.connect(self._paste_from_file)
+        menu.exec(event.globalPos())
+
+    def _toggle_word_wrap(self, checked: bool) -> None:
+        self.setWrapMode(
+            QsciScintilla.WrapMode.WrapWord
+            if checked
+            else QsciScintilla.WrapMode.WrapNone
+        )
+        config = AppConfig()
+        config.raw_word_wrap = checked
+        config.save()
+
+    def _paste_from_file(self) -> None:
+        """Read a file and replace the editor content with its decoded text
+        (available while the editor is editable)."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Paste From File", "", "All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            return
+        encoding = (
+            self._inspector._encoding
+            if self._inspector is not None
+            else DEFAULT_ENCODING
+        )
+        text = _decode_bytes(data, encoding)
+        # Use length-aware Scintilla commands instead of the Qt string
+        # helpers: the latter treat NUL as a C-string terminator.  Scintilla
+        # positions are byte offsets when UTF-8 mode is enabled.
+        payload = text.encode("utf-8")
+        start = self.SendScintilla(QsciScintillaBase.SCI_GETSELECTIONSTART)
+        end = self.SendScintilla(QsciScintillaBase.SCI_GETSELECTIONEND)
+        self.SendScintilla(QsciScintillaBase.SCI_BEGINUNDOACTION)
+        if end > start:
+            self.SendScintilla(
+                QsciScintillaBase.SCI_DELETERANGE, start, end - start
+            )
+        self.SendScintilla(QsciScintillaBase.SCI_GOTOPOS, start)
+        self.SendScintilla(
+            QsciScintillaBase.SCI_ADDTEXT, len(payload), payload
+        )
+        self.SendScintilla(QsciScintillaBase.SCI_ENDUNDOACTION)
+
+    def _save_zoom(self) -> None:
+        config = AppConfig()
+        config.raw_font_zoom = int(
+            self.SendScintilla(QsciScintillaBase.SCI_GETZOOM)
+        )
+        config.save()
+
+
 class _EncodingTextEdit(QPlainTextEdit):
     """QPlainTextEdit with right-click encoding menu, delegates to InspectorPanel."""
 
@@ -767,7 +899,7 @@ class _RawSearchBar(QWidget):
     """Bottom bar for the Raw tab: keyword search with a Regex toggle,
     Find-next navigation from the current cursor, and occurrence counting."""
 
-    def __init__(self, editor: _EncodingTextEdit, parent: QWidget | None = None):
+    def __init__(self, editor: _ScintillaTextEdit, parent: QWidget | None = None):
         super().__init__(parent)
         self._editor = editor
 
@@ -802,30 +934,17 @@ class _RawSearchBar(QWidget):
             if not rx.isValid():
                 QMessageBox.warning(self, "Error", f"Invalid regular expression: {pattern}")
                 return
-            found = editor.find(rx)
-            if not found:
-                # Wrap around and search from the start of the document.
-                cursor = editor.textCursor()
-                cursor.movePosition(QTextCursor.MoveOperation.Start)
-                editor.setTextCursor(cursor)
-                found = editor.find(rx)
-                if not found:
-                    self._count_btn.setText("Count:0")
+            found = editor.find_first(pattern, True)
         else:
-            found = editor.find(pattern)
-            if not found:
-                cursor = editor.textCursor()
-                cursor.movePosition(QTextCursor.MoveOperation.Start)
-                editor.setTextCursor(cursor)
-                found = editor.find(pattern)
-                if not found:
-                    self._count_btn.setText("Count:0")
+            found = editor.find_first(pattern, False)
+        if not found:
+            self._count_btn.setText("Count:0")
 
     def _count_matches(self) -> None:
         pattern = self._keyword.text()
         if not pattern:
             return
-        text = self._editor.toPlainText()
+        text = self._editor.text()
         if self._regex.isChecked():
             try:
                 count = sum(1 for _ in re.finditer(pattern, text))
@@ -1061,8 +1180,7 @@ class InspectorPanel(QWidget):
         self._current_flow = None
         config = AppConfig()
         self._encoding = config.raw_encoding if config.raw_encoding in ENCODINGS else DEFAULT_ENCODING
-        self._text_widgets: dict[str, QPlainTextEdit] = {}
-        self._raw_display_body = ""
+        self._text_widgets: dict[str, QPlainTextEdit | _ScintillaTextEdit] = {}
         self._image_widget: _ImageViewWidget | None = None
         self._web_view: QWebEngineView | None = None
         self._webforms_widget: _WebFormsWidget | None = None
@@ -1097,10 +1215,8 @@ class InspectorPanel(QWidget):
                 self._webforms_widget = _WebFormsWidget()
                 self._tabs.addTab(self._webforms_widget, label)
             elif label == "Raw":
-                widget = _EncodingTextEdit(self)
-                widget.setFont(mono_font)
+                widget = _ScintillaTextEdit(self)
                 widget.setPlaceholderText(f"Select a session to view {label}")
-                widget.setStyleSheet("QPlainTextEdit { selection-background-color: #66B2FF; }")
                 self._text_widgets[label] = widget
                 # Bottom search bar (keyword / Regex / Find / Count)
                 container = QWidget()
@@ -1175,11 +1291,8 @@ class InspectorPanel(QWidget):
             safe_content = None
 
         if tab_name == "Raw":
-            try:
-                raw_body_bytes = req.content
-            except ValueError:
-                raw_body_bytes = None
-            self._raw_display_body = _decode_bytes(raw_body_bytes, enc)
+            # QScintilla preserves the body's original line endings, so no
+            # separate display-body bookkeeping is needed anymore.
             self.set_content("Raw", _format_request_raw(flow, enc))
         elif tab_name == "Headers":
             status_line = f"{req.method} {req.path} {req.http_version}"
@@ -1210,11 +1323,8 @@ class InspectorPanel(QWidget):
             safe_content = None
 
         if tab_name == "Raw":
-            try:
-                raw_body_bytes = resp.content
-            except ValueError:
-                raw_body_bytes = None
-            self._raw_display_body = _decode_bytes(raw_body_bytes, enc)
+            # QScintilla preserves the body's original line endings, so no
+            # separate display-body bookkeeping is needed anymore.
             self.set_content("Raw", _format_response_raw(flow, enc))
         elif tab_name == "Headers":
             status_line = f"{resp.http_version} {resp.status_code} {resp.reason}"
@@ -1438,7 +1548,9 @@ class InspectorPanel(QWidget):
             if raw_str:
                 lines = raw_str.split("\n")
                 try:
-                    parts = lines[0].split(" ", 2)
+                    # The request line may carry a trailing "\r" when the user
+                    # typed CRLF line endings; strip it before parsing.
+                    parts = lines[0].rstrip("\r").split(" ", 2)
                     req.method = parts[0]
                     if len(parts) > 1:
                         from urllib.parse import urlparse
@@ -1479,7 +1591,7 @@ class InspectorPanel(QWidget):
                                     _s = (parsed.scheme or req.scheme).lower()
                                     req.port = 443 if _s == "https" else 80
                     if len(parts) > 2:
-                        req.http_version = parts[2]
+                        req.http_version = parts[2].rstrip("\r")
                 except (IndexError, ValueError):
                     pass
 
@@ -1491,6 +1603,7 @@ class InspectorPanel(QWidget):
                         break
                     try:
                         k, v = lines[i].split(": ", 1)
+                        v = v.rstrip("\r")
                         if i == 1:
                             req.headers.clear()
                         req.headers.add(k, v)
@@ -1507,15 +1620,12 @@ class InspectorPanel(QWidget):
                     or hostport(req.scheme, req.host, req.port)
                 )
 
-                # Body is everything after the empty line.  Merge the edited
-                # text back into the original bytes so line endings the user
-                # did not touch are preserved exactly (see _merge_edited_bytes).
+                # Body is everything after the empty line.  QScintilla keeps the
+                # body's original line endings (CRLF stays CRLF), so encoding
+                # the text back preserves the packet's line breaks as-is.
                 if header_end > 0 and header_end + 1 < len(lines):
                     body = "\n".join(lines[header_end + 1:])
-                    body_bytes = _merge_edited_bytes(
-                        self._raw_display_body or "", body, self._encoding
-                    )
-                    req.content = body_bytes
+                    req.content = body.encode(self._encoding, errors="replace")
 
         # ── 2. Apply WebForms tab edits (query / body override Raw values) ──
         self.apply_webforms_edits(flow)
@@ -1542,7 +1652,9 @@ class InspectorPanel(QWidget):
         if not resp:
             return
         try:
-            parts = lines[0].split(" ", 2)
+            # The status line may carry a trailing "\r" when the user typed
+            # CRLF line endings; strip it before parsing.
+            parts = lines[0].rstrip("\r").split(" ", 2)
             if len(parts) >= 1:
                 resp.http_version = parts[0]
             if len(parts) >= 2:
@@ -1563,18 +1675,19 @@ class InspectorPanel(QWidget):
                 break
             try:
                 k, v = lines[i].split(": ", 1)
+                v = v.rstrip("\r")
                 if i == 1:
                     resp.headers.clear()
                 resp.headers.add(k, v)
             except ValueError:
                 pass
 
-        # Body is everything after the empty line
+        # Body is everything after the empty line.  QScintilla keeps the
+        # body's original line endings (CRLF stays CRLF), so encoding the
+        # text back preserves the packet's line breaks as-is.
         if header_end > 0 and header_end + 1 < len(lines):
             body = "\n".join(lines[header_end + 1:])
-            resp.content = _merge_edited_bytes(
-                self._raw_display_body or "", body, self._encoding
-            )
+            resp.content = body.encode(self._encoding, errors="replace")
 
         # Refresh all tabs from the updated flow
         if flow.response:
@@ -2752,9 +2865,9 @@ class NewSessionDialog(QDialog):
         raw_layout = QVBoxLayout(raw_tab)
         raw_layout.setContentsMargins(0, 0, 0, 0)
 
-        self._raw_editor = QPlainTextEdit()
-        self._raw_editor.setFont(QFont("Consolas", 11))
-        self._raw_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._raw_editor = _ScintillaTextEdit()
+        self._raw_editor.setReadOnly(False)  # New Session is a compose editor
+        self._raw_editor.setWrapMode(QsciScintilla.WrapMode.WrapNone)
         self._raw_editor.setPlaceholderText(
             "GET https://example.com/api HTTP/1.1\n"
             "Host: example.com\n"
@@ -2782,7 +2895,7 @@ class NewSessionDialog(QDialog):
 
     def _on_send(self) -> None:
         """Parse raw text, create a flow, and send it."""
-        raw_text = self._raw_editor.toPlainText().strip()
+        raw_text = self._raw_editor.text().strip()
         if not raw_text:
             return
 
@@ -2810,7 +2923,11 @@ class NewSessionDialog(QDialog):
         from mitmproxy.http import HTTPFlow, Request, Headers
         from urllib.parse import urlparse
 
-        lines = raw_text.split("\n")
+        # QScintilla preserves the line endings the user pasted (CRLF stays
+        # CRLF).  Normalize them only for parsing; the body is re-encoded with
+        # its original EOL style below.
+        norm_text = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+        lines = norm_text.split("\n")
 
         # Parse request line: METHOD URL HTTP_VERSION
         if not lines:
@@ -2844,16 +2961,10 @@ class NewSessionDialog(QDialog):
         content = ""
         if header_end > 0 and header_end + 1 < len(lines):
             body_text = "\n".join(lines[header_end + 1:])
-            # Qt's toPlainText() normalises \r\n → \n.  Restore CRLF for
-            # multipart bodies per RFC 2046, same as apply_request_edits.
-            body_text = body_text.replace("\r\n", "\n").replace("\r", "\n")
-            body_bytes = body_text.encode("utf-8")
-            ct = (headers.get("content-type", "") or "").lower()
-            if "multipart" in ct and body_bytes:
-                body_bytes = body_bytes.replace(b"\n", b"\r\n")
-                if not body_bytes.endswith(b"\r\n"):
-                    body_bytes += b"\r\n"
-            content = body_bytes
+            # Restore the EOL style the user pasted (QScintilla keeps CRLF).
+            if "\r\n" in raw_text:
+                body_text = body_text.replace("\n", "\r\n")
+            content = body_text.encode("utf-8")
 
         # Create the request
         from mitmproxy.net.http.url import hostport
@@ -4007,6 +4118,9 @@ class MitmGuiMainWindow(QMainWindow):
             return
         theme_id = act.data()
         themes.apply_theme(QApplication.instance(), theme_id)
+        # QScintilla editors draw their own colours, so refresh them too.
+        for w in self.findChildren(_ScintillaTextEdit):
+            w.apply_theme(theme_id)
         self._config.theme = theme_id
         self._config.save()
         self._apply_title_bar_theme(theme_id)
@@ -6501,9 +6615,12 @@ class MitmGuiMainWindow(QMainWindow):
             geo = self.normalGeometry()
         else:
             geo = self.geometry()
-        self._config.window_geometry = [geo.x(), geo.y(), geo.width(), geo.height()]
-        self._config.window_maximized = self.isMaximized()
-        self._config.save()
+        # Reload first because editor preferences are saved by short-lived
+        # AppConfig instances and self._config may contain an older snapshot.
+        config = AppConfig()
+        config.window_geometry = [geo.x(), geo.y(), geo.width(), geo.height()]
+        config.window_maximized = self.isMaximized()
+        config.save()
         self._master.stop()
         event.accept()
 

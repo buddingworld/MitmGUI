@@ -27,6 +27,34 @@ THEMES: dict[str, str] = {
     "pyqt_dark": "PyQtDarkTheme (Dark)",
 }
 
+# Editor colours per theme for QScintilla widgets (Raw tab / New Session).
+# QScintilla paints its own editor background, so the application QSS cannot
+# colour the editor area; these values mirror each theme's
+# QLineEdit/QPlainTextEdit/QTextEdit rules and are applied programmatically.
+# Format: (background, foreground, selection_background, selection_foreground)
+EDITOR_COLORS: dict[str, tuple[str, str, str, str]] = {
+    DEFAULT_THEME: ("#FFFFFF", "#000000", "#308CC6", "#FFFFFF"),
+    "ios": ("#FFFFFF", "#000000", "#007AFF", "#FFFFFF"),
+    "android": ("#FFFFFF", "#1D1B20", "#6750A4", "#FFFFFF"),
+    "pyqt_light": ("#FFFFFF", "#4D5157", "#0081DB", "#FFFFFF"),
+    "pyqt_dark": ("#202124", "#E4E7EB", "#12507B", "#FFFFFF"),
+}
+
+# Editor fonts per theme for QScintilla widgets, mirroring the
+# QsciScintilla rule of each stylesheet.  Qt 6 resolves the QSS
+# "font-size: 13px" of the QsciScintilla rules to a 13 px pixel font and
+# applies it over any widget-level setFont() (QSS wins), so these values
+# are only a fallback for the "default" theme which has no stylesheet
+# (there the application font is used: point_size 0).
+# Format: (family, point_size)
+THEME_FONTS: dict[str, tuple[str, int]] = {
+    DEFAULT_THEME: ("Segoe UI", 0),
+    "ios": ("Segoe UI", 13),
+    "android": ("Segoe UI", 13),
+    "pyqt_light": ("Segoe UI", 13),
+    "pyqt_dark": ("Segoe UI", 13),
+}
+
 # ── iOS 26 ("Liquid Glass") inspired theme ──────────────────────────────────
 
 IOS_STYLESHEET = """
@@ -215,6 +243,22 @@ QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {
 QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled {
     background-color: #F2F2F7;
     color: #C7C7CC;
+}
+
+QsciScintilla {
+    background-color: #FFFFFF;
+    border: 1px solid #D1D1D6;
+    border-radius: 10px;
+    padding: 6px;
+    /* Pick a font that actually exists on Windows: Scintilla passes the
+       family name straight to GDI, so the "SF Pro Display" fallback chain
+       of the global "*" rule would resolve to a different (bolder/larger
+       looking) system font than Qt uses for QPlainTextEdit. */
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+}
+QsciScintilla:focus {
+    border: 1px solid #007AFF;
 }
 
 QComboBox, QSpinBox, QDoubleSpinBox {
@@ -566,6 +610,21 @@ QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled {
     color: #CAC4D0;
 }
 
+QsciScintilla {
+    background-color: #FFFFFF;
+    border: 1px solid #79747E;
+    border-radius: 8px;
+    padding: 7px;
+    /* "Roboto" does not exist on Windows; name a real font first so
+       Scintilla's GDI resolution matches the Qt fallback of the global
+       "*" rule (Segoe UI). */
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+}
+QsciScintilla:focus {
+    border: 2px solid #6750A4;
+}
+
 QComboBox, QSpinBox, QDoubleSpinBox {
     background-color: #FFFFFF;
     border: 1px solid #79747E;
@@ -914,6 +973,18 @@ QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled {
     color: #BABDC2;
 }
 
+QsciScintilla {
+    background-color: #FFFFFF;
+    border: 1px solid #DADCE0;
+    border-radius: 4px;
+    padding: 5px;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+}
+QsciScintilla:focus {
+    border: 1px solid #0081DB;
+}
+
 QComboBox, QSpinBox, QDoubleSpinBox {
     background-color: #F8F9FA;
     border: 1px solid #DADCE0;
@@ -1256,6 +1327,18 @@ QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus {
 }
 QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled {
     color: #697177;
+}
+
+QsciScintilla {
+    background-color: #202124;
+    border: 1px solid #3F4042;
+    border-radius: 4px;
+    padding: 5px;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+}
+QsciScintilla:focus {
+    border: 1px solid #8AB4F7;
 }
 
 QComboBox, QSpinBox, QDoubleSpinBox {
