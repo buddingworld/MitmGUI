@@ -141,7 +141,6 @@ exclude_lines = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = "test"
 addopts = "--capture=no --color=yes"
 filterwarnings = [
     "ignore::DeprecationWarning:tornado.*:",
@@ -239,10 +238,6 @@ check_untyped_defs = true
 ignore_missing_imports = true
 files = [
     "mitmproxy",
-    "release/*.py",
-]
-exclude = [
-    "^release/build/",
 ]
 
 [[tool.mypy.overrides]]
@@ -253,19 +248,12 @@ ignore_errors = true
 module = "tornado.*"
 ignore_errors = true
 
-[[tool.mypy.overrides]]
-module = "test.*"
-ignore_errors = true
-
 [tool.ruff]
 extend-exclude = ["mitmproxy/contrib/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "TID251"]
 ignore = ["F541", "E501"]
-
-[tool.ruff.lint.per-file-ignores]
-"test/**" = ["TID251"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "asyncio.create_task".msg = "Use mitmproxy.utils.asyncio_utils.create_task instead to avoid GC footgun."
@@ -278,7 +266,7 @@ force-single-line = true
 order-by-type = false
 section-order = ["future", "standard-library", "third-party", "local-folder","first-party"]
 no-lines-before = ["first-party"]
-known-first-party = ["test", "mitmproxy", "mitmproxy_rs"]
+known-first-party = ["mitmproxy", "mitmproxy_rs"]
 
 [tool.tox]
 env_list = ["lint", "mypy", "py"]
@@ -294,28 +282,16 @@ commands = [
         "--cov-report", "xml",
         "--continue-on-collection-errors",
         "--cov=mitmproxy",
-        "--cov=release",
         { replace = "posargs", default = ["--timeout", "60"], extend = true }
     ],
 ]
-
-[tool.tox.env.test-offline]
-commands = [["bash", "test/run-tests-offline.sh"]]
-allowlist_externals = ["bash"]
 
 [tool.tox.env.lint]
 commands = [["ruff", "check",  "."]]
 dependency_groups = ["ruff"]
 
-[tool.tox.env.filename_matching]
-commands = [["python", "./test/filename_matching.py"]]
-dependency_groups = []
-
 [tool.tox.env.mypy]
 commands = [["mypy"]]
-
-[tool.tox.env.individual_coverage]
-commands = [["python", "./test/individual_coverage.py", { default = [], replace = "posargs", extend = true }]]
 
 [tool.tox.env.old-dependencies]
 uv_resolution = "lowest-direct"
