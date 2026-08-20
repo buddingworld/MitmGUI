@@ -51,20 +51,20 @@ def parse(url: str | bytes) -> tuple[bytes, bytes, int, bytes]:
             url[3] = urllib.parse.quote(url[3])  # type: ignore
             url = urllib.parse.urlunsplit(url)  # type: ignore
 
-    parsed: urllib.parse.ParseResult = urllib.parse.urlparse(url)
+    parsed: urllib.parse.SplitResult = urllib.parse.urlsplit(url)
     if not parsed.hostname:
         raise ValueError("No hostname given")
     else:
         host = parsed.hostname.encode("idna")
 
-    parsed_b: urllib.parse.ParseResultBytes = parsed.encode("ascii")  # type: ignore
+    parsed_b: urllib.parse.SplitResultBytes = parsed.encode("ascii")  # type: ignore
 
     port = parsed_b.port
     if not port:
         port = 443 if parsed_b.scheme == b"https" else 80
 
-    full_path: bytes = urllib.parse.urlunparse(
-        (b"", b"", parsed_b.path, parsed_b.params, parsed_b.query, parsed_b.fragment)  # type: ignore
+    full_path: bytes = urllib.parse.urlunsplit(
+        (b"", b"", parsed_b.path, parsed_b.query, parsed_b.fragment)  # type: ignore
     )
     if not full_path.startswith(b"/"):
         full_path = b"/" + full_path  # type: ignore

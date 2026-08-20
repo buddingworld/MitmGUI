@@ -706,7 +706,7 @@ class MitmGuiMaster(master.Master):
         if self._thread:
             self._thread.join(timeout=5)
 
-    def replay_flow(self, flow) -> None:
+    def replay_flow(self, flow, on_error=None) -> None:
         """Schedule a flow for replay on the proxy event loop.
 
         This must be called from any thread. The replay will execute on
@@ -715,7 +715,19 @@ class MitmGuiMaster(master.Master):
         """
         if self._loop:
             def _do_replay():
-                self.commands.execute(f"replay.client @{flow.id}")
+                try:
+                    playback = self.addons.get("clientplayback")
+                    if playback:
+                        error = playback.check(flow)
+                        if error:
+                            if on_error:
+                                on_error(error)
+                            return
+                    self.commands.execute(f"replay.client @{flow.id}")
+                except Exception as e:
+                    logger.exception("Failed to replay flow %s", flow.id)
+                    if on_error:
+                        on_error(str(e))
             self._loop.call_soon_threadsafe(_do_replay)
 
     def _run_loop(self) -> None:

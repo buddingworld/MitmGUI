@@ -2,4 +2,4 @@
 - Unless specified, all the window created should not be blocking.
 - Don't take screenshot to detect problem.
 - if not specified or for pushing to github, do not use git and uv command.
-- github project: https://github.com/buddingworld/MitmGUI use branch "master"
+- github project: https://github.com/buddingworld/MitmGUI branch:master

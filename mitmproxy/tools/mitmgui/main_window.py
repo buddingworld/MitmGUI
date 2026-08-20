@@ -1433,14 +1433,14 @@ class InspectorPanel(QWidget):
 
     def _populate_webforms(self, req) -> None:
         """Extract URL query params and body form params, show in tables."""
-        from urllib.parse import parse_qs, urlparse
+        from urllib.parse import parse_qs, urlsplit
 
         query_items: list[tuple[str, str]] = []
         body_items: list[tuple[str, str]] = []
 
         # Extract query string params from URL
         if req.path:
-            parsed = urlparse(req.path)
+            parsed = urlsplit(req.path)
             if parsed.query:
                 qs = parse_qs(parsed.query, keep_blank_values=True)
                 for k, vals in qs.items():
@@ -1484,21 +1484,15 @@ class InspectorPanel(QWidget):
         if not req:
             return
 
-        from urllib.parse import urlparse, urlencode
+        from urllib.parse import urlsplit, urlencode, urlunsplit
 
         query_pairs = self._webforms_widget.get_query_params()
         body_pairs = self._webforms_widget.get_body_params()
 
-        # Update query string in path
-        parsed = urlparse(req.path)
-        if query_pairs:
-            new_query = urlencode(query_pairs)
-            new_path = parsed.path + "?" + new_query
-        else:
-            new_path = parsed.path
-        if parsed.fragment:
-            new_path += "#" + parsed.fragment
-        req.path = new_path
+        # Update query string without treating semicolons as URL parameters.
+        parsed = urlsplit(req.path)
+        new_query = urlencode(query_pairs) if query_pairs else ""
+        req.path = urlunsplit(("", "", parsed.path, new_query, parsed.fragment))
 
         # Update body — only touch it when the content is actually
         # form-encoded.  For JSON, XML, or other content types we must
@@ -1538,18 +1532,10 @@ class InspectorPanel(QWidget):
                     parts = lines[0].rstrip("\r").split(" ", 2)
                     req.method = parts[0]
                     if len(parts) > 1:
-                        from urllib.parse import urlparse
-                        parsed = urlparse(parts[1])
-                        # Reconstruct full path including params (";"), query,
-                        # and fragment so characters like ";" are preserved.
-                        path = parsed.path
-                        if parsed.params:
-                            path += ";" + parsed.params
-                        if parsed.query:
-                            path += "?" + parsed.query
-                        if parsed.fragment:
-                            path += "#" + parsed.fragment
-                        req.path = path
+                        from urllib.parse import urlsplit, urlunsplit
+                        parsed = urlsplit(parts[1])
+                        # Keep the path verbatim, including a trailing semicolon.
+                        req.path = urlunsplit(("", "", parsed.path, parsed.query, parsed.fragment))
                         if parsed.scheme:
                             req.scheme = parsed.scheme
                         if parsed.hostname:
@@ -2886,7 +2872,7 @@ class NewSessionDialog(QDialog):
 
         try:
             flow = self._parse_raw_to_flow(raw_text)
-        except ValueError as e:
+        except (ValueError, TypeError) as e:
             QMessageBox.warning(self, "Parse Error", str(e))
             return
 
@@ -2897,7 +2883,12 @@ class NewSessionDialog(QDialog):
         mw = self._main_window
         mw._session_model.add_flow(flow)
         mw._master.view.add([flow])
-        mw._master.replay_flow(flow)
+        mw._master.replay_flow(
+            flow,
+            lambda error: QTimer.singleShot(
+                0, lambda: QMessageBox.warning(self, "Send Error", error)
+            ),
+        )
         mw._select_flow(flow)
 
         self.accept()
@@ -4890,16 +4881,13 @@ class MitmGuiMainWindow(QMainWindow):
             req = flow.request
             if not req or req.method.upper() != "GET":
                 continue
-            from urllib.parse import urlparse, urlencode, parse_qs
+            from urllib.parse import urlsplit, urlencode, urlunsplit, parse_qs
             
-            parsed = urlparse(req.path)
+            parsed = urlsplit(req.path)
             if not parsed.query:
                 # No query string: append ?id=1 before converting
-                new_path = parsed.path + "?id=1"
-                if parsed.fragment:
-                    new_path += "#" + parsed.fragment
-                req.path = new_path
-                parsed = urlparse(req.path)
+                req.path = urlunsplit(("", "", parsed.path, "id=1", parsed.fragment))
+                parsed = urlsplit(req.path)
             
             # Build urlencoded body from query string
             qs_pairs: list[tuple[str, str]] = []
@@ -4911,11 +4899,8 @@ class MitmGuiMainWindow(QMainWindow):
             req.content = body
             req.method = "POST"
             
-            # Remove query string from path
-            new_path = parsed.path
-            if parsed.fragment:
-                new_path += "#" + parsed.fragment
-            req.path = new_path
+            # Remove query string from path while preserving path parameters and fragment.
+            req.path = urlunsplit(("", "", parsed.path, "", parsed.fragment))
             
             # Set Content-Type header
             req.headers[b"content-type"] = b"application/x-www-form-urlencoded"
@@ -4945,7 +4930,7 @@ class MitmGuiMainWindow(QMainWindow):
                 modified.append(flow)
                 continue
 
-            from urllib.parse import urlparse, urlencode, parse_qs
+            from urllib.parse import urlsplit, urlencode, urlunsplit, parse_qs
 
             ct = req.headers.get("content-type", "").lower()
             pairs: list[tuple[str, str]] = []
@@ -4971,15 +4956,12 @@ class MitmGuiMainWindow(QMainWindow):
 
             # Build query string and append to path
             qs = urlencode(pairs)
-            parsed = urlparse(req.path)
+            parsed = urlsplit(req.path)
             if parsed.query:
                 new_query = parsed.query + "&" + qs
             else:
                 new_query = qs
-            new_path = parsed.path + "?" + new_query
-            if parsed.fragment:
-                new_path += "#" + parsed.fragment
-            req.path = new_path
+            req.path = urlunsplit(("", "", parsed.path, new_query, parsed.fragment))
 
             req.method = "GET"
             req.content = None

@@ -840,13 +840,13 @@ class Request(Message):
         return url.unparse(self.scheme, pretty_host, pretty_port, path)
 
     def _get_query(self):
-        query = urllib.parse.urlparse(self.url).query
+        query = urllib.parse.urlsplit(self.url).query
         return tuple(url.decode(query))
 
     def _set_query(self, query_data):
         query = url.encode(query_data)
-        _, _, path, params, _, fragment = urllib.parse.urlparse(self.url)
-        self.path = urllib.parse.urlunparse(["", "", path, params, query, fragment])
+        parsed = urllib.parse.urlsplit(self.url)
+        self.path = urllib.parse.urlunsplit(("", "", parsed.path, query, parsed.fragment))
 
     @property
     def query(self) -> multidict.MultiDictView[str, str]:
@@ -887,7 +887,7 @@ class Request(Message):
         The URL's path components as a tuple of strings.
         Components are unquoted.
         """
-        path = urllib.parse.urlparse(self.url).path
+        path = urllib.parse.urlsplit(self.url).path
         # This needs to be a tuple so that it's immutable.
         # Otherwise, this would fail silently:
         #   request.path_components.append("foo")
@@ -897,8 +897,8 @@ class Request(Message):
     def path_components(self, components: Iterable[str]):
         components = map(lambda x: url.quote(x, safe=""), components)
         path = "/" + "/".join(components)
-        _, _, _, params, query, fragment = urllib.parse.urlparse(self.url)
-        self.path = urllib.parse.urlunparse(["", "", path, params, query, fragment])
+        parsed = urllib.parse.urlsplit(self.url)
+        self.path = urllib.parse.urlunsplit(("", "", path, parsed.query, parsed.fragment))
 
     def anticache(self) -> None:
         """
