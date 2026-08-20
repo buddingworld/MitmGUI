@@ -27,7 +27,7 @@ THEMES: dict[str, str] = {
     "pyqt_dark": "PyQtDarkTheme (Dark)",
 }
 
-# Editor colours per theme for QScintilla widgets (Raw tab / New Session).
+# Editor colours per theme for QScintilla widgets (inspection tabs / New Session).
 # QScintilla paints its own editor background, so the application QSS cannot
 # colour the editor area; these values mirror each theme's
 # QLineEdit/QPlainTextEdit/QTextEdit rules and are applied programmatically.

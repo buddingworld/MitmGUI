@@ -881,20 +881,6 @@ class _ScintillaTextEdit(QsciScintilla):
         config.save()
 
 
-class _EncodingTextEdit(QPlainTextEdit):
-    """QPlainTextEdit with right-click encoding menu, delegates to InspectorPanel."""
-
-    def __init__(self, inspector_panel: "InspectorPanel"):
-        super().__init__()
-        self._inspector = inspector_panel
-        self.setReadOnly(True)
-
-    def contextMenuEvent(self, event) -> None:
-        menu = self.createStandardContextMenu()
-        self._inspector.add_encoding_menu(menu)
-        menu.exec(event.globalPos())
-
-
 class _RawSearchBar(QWidget):
     """Bottom bar for the Raw tab: keyword search with a Regex toggle,
     Find-next navigation from the current cursor, and occurrence counting."""
@@ -1180,7 +1166,7 @@ class InspectorPanel(QWidget):
         self._current_flow = None
         config = AppConfig()
         self._encoding = config.raw_encoding if config.raw_encoding in ENCODINGS else DEFAULT_ENCODING
-        self._text_widgets: dict[str, QPlainTextEdit | _ScintillaTextEdit] = {}
+        self._text_widgets: dict[str, _ScintillaTextEdit] = {}
         self._image_widget: _ImageViewWidget | None = None
         self._web_view: QWebEngineView | None = None
         self._webforms_widget: _WebFormsWidget | None = None
@@ -1199,8 +1185,6 @@ class InspectorPanel(QWidget):
         else:
             self._tabs = QTabWidget(self)
         self._tabs.setTabPosition(QTabWidget.TabPosition.North)
-
-        mono_font = QFont("Consolas", 10)
 
         for label in tab_labels:
             if label == "WebView":
@@ -1227,8 +1211,9 @@ class InspectorPanel(QWidget):
                 box.addWidget(_RawSearchBar(widget))
                 self._tabs.addTab(container, label)
             else:
-                widget = _EncodingTextEdit(self)
-                widget.setFont(mono_font)
+                # Text-based inspection tabs use the same themed Scintilla
+                # editor as Raw, including persisted zoom and Word Wrap.
+                widget = _ScintillaTextEdit(self)
                 widget.setPlaceholderText(f"Select a session to view {label}")
                 self._tabs.addTab(widget, label)
                 self._text_widgets[label] = widget
