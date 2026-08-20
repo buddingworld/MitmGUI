@@ -3824,6 +3824,7 @@ class MitmGuiMainWindow(QMainWindow):
         self._resize_edge: str | None = None             # Qt-level edge resize state
         self._resize_start_global = QPoint()
         self._resize_start_geom = QRect()
+        self._normal_geo: QRect | None = None            # geometry to restore to after maximize
         self._mouse_grabbed = False                      # system-menu Move/Size loop
         self._dwm_shadow_enabled = False                 # DWM shadow applied once on first show
         self.setMouseTracking(True)  # hover feedback for edge resizing
@@ -6280,6 +6281,21 @@ class MitmGuiMainWindow(QMainWindow):
         if hdr is not None:
             hdr.set_dark(theme_id in _DARK_THEMES)
 
+    def _native_is_maximized(self) -> bool:
+        """Read the real native WS_MAXIMIZE style bit (Windows).  Qt's
+        isMaximized() can disagree with the OS state on frameless windows."""
+        if sys.platform != "win32":
+            return False
+        try:
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+            user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+            style = user32.GetWindowLongPtrW(wintypes.HWND(hwnd), _GWL_STYLE)
+            return bool(style & 0x01000000)  # WS_MAXIMIZE
+        except Exception:
+            return False
+
     def _restore_window_geometry(self) -> None:
         """Restore the last window position/size if it is still on a screen."""
         saved = self._config.window_geometry
@@ -6294,7 +6310,50 @@ class MitmGuiMainWindow(QMainWindow):
                     y = min(max(rect.y(), avail.top()), avail.bottom() - height)
                     self.setGeometry(x, y, width, height)
                     return
-        self.resize(1613, 1008)
+        avail = QApplication.primaryScreen().availableGeometry()
+        w = min(1613, max(self.minimumWidth(), avail.width() - 20))
+        h = min(1008, max(self.minimumHeight(), avail.height() - 20))
+        self.resize(w, h)
+
+    def showNormal(self) -> None:
+        """Restore the window to its normal (non-maximized) size.
+
+        On Windows this frameless window (WS_THICKFRAME + DWM, see
+        _enable_dwm_shadow) hits a Qt bug: Qt's own showNormal() flips
+        isMaximized() to False but never clears the native WS_MAXIMIZE style
+        bit, so every later move()/setGeometry() is forced back to the
+        maximized rect by the OS.  Clear WS_MAXIMIZE natively and re-apply the
+        geometry we saved right before maximizing."""
+        did_restore = False
+        if sys.platform == "win32" and (self.isMaximized() or self._native_is_maximized()):
+            did_restore = True
+            try:
+                hwnd = int(self.winId())
+                user32 = ctypes.windll.user32
+                user32.ShowWindow(wintypes.HWND(hwnd), 9)  # SW_RESTORE
+                # Belt and braces: drop WS_MAXIMIZE explicitly so the OS can
+                # no longer override our geometry afterwards.
+                user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+                user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+                style = user32.GetWindowLongPtrW(wintypes.HWND(hwnd), _GWL_STYLE)
+                if style & 0x01000000:  # WS_MAXIMIZE
+                    user32.SetWindowLongPtrW(wintypes.HWND(hwnd), _GWL_STYLE, style & ~0x01000000)
+                    user32.SetWindowPos(
+                        wintypes.HWND(hwnd), wintypes.HWND(0), 0, 0, 0, 0,
+                        _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOZORDER | _SWP_FRAMECHANGED,
+                    )
+            except Exception:
+                pass
+        super().showNormal()
+        if did_restore and not self.isMaximized() and self._normal_geo is not None:
+            self.setGeometry(self._normal_geo)
+
+    def showMaximized(self) -> None:
+        # Remember the real normal geometry: Qt's own record gets corrupted to
+        # the maximized rect when this frameless window is restored later.
+        if not self.isMaximized():
+            self._normal_geo = QRect(self.geometry())
+        super().showMaximized()
 
     def _toggle_maximize(self) -> None:
         if self.isMaximized():
@@ -6597,7 +6656,7 @@ class MitmGuiMainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         # Persist window state so the next launch opens where it left off
         if self.isMaximized():
-            geo = self.normalGeometry()
+            geo = self._normal_geo if self._normal_geo is not None else self.normalGeometry()
         else:
             geo = self.geometry()
         # Reload first because editor preferences are saved by short-lived
