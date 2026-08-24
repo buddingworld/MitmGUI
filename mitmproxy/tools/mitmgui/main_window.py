@@ -1522,7 +1522,8 @@ class InspectorPanel(QWidget):
 
         # ── 1. Apply Raw tab edits (method, URL, headers, body) ──
         raw_text = self._text_widgets.get("Raw")
-        if raw_text and raw_text.document().isModified():
+        raw_modified = bool(raw_text and raw_text.document().isModified())
+        if raw_modified:
             raw_str = raw_text.toPlainText()
             if raw_str:
                 lines = raw_str.split("\n")
@@ -1598,8 +1599,11 @@ class InspectorPanel(QWidget):
                     body = "\n".join(lines[header_end + 1:])
                     req.content = body.encode(self._encoding, errors="replace")
 
-        # ── 2. Apply WebForms tab edits (query / body override Raw values) ──
-        self.apply_webforms_edits(flow)
+        # ── 2. Apply WebForms tab edits only when Raw was not edited. Raw is
+        # the source of truth for Edit And Replay; otherwise stale WebForms data
+        # can overwrite manually appended POST body bytes.
+        if not raw_modified:
+            self.apply_webforms_edits(flow)
 
         # ── 3. Regenerate Raw text from the updated flow ──
         enc = self._encoding
@@ -2849,6 +2853,10 @@ class NewSessionDialog(QDialog):
         raw_layout.addWidget(self._raw_editor)
         self._tab_widget.addTab(raw_tab, "Raw")
 
+        self._keep_open_checkbox = QCheckBox("Keep open after Send")
+        self._keep_open_checkbox.setToolTip("Keep this window open for repeated sends.")
+        self._tab_widget.setCornerWidget(self._keep_open_checkbox, Qt.Corner.TopRightCorner)
+
         # Buttons
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -2891,7 +2899,8 @@ class NewSessionDialog(QDialog):
         )
         mw._select_flow(flow)
 
-        self.accept()
+        if not self._keep_open_checkbox.isChecked():
+            self.accept()
 
     @staticmethod
     def _parse_raw_to_flow(raw_text: str):
