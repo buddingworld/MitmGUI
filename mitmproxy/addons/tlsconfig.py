@@ -2,7 +2,6 @@ import ipaddress
 import logging
 import os
 import ssl
-import urllib.parse
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -600,17 +599,8 @@ class TlsConfig:
             if upstream_cert.organization:
                 organization = upstream_cert.organization
 
-            # Replace original URL path with the CA cert serial number, which acts as a magic token
-            if crls := upstream_cert.crl_distribution_points:
-                try:
-                    scheme, netloc, *_ = urllib.parse.urlsplit(crls[0])
-                except ValueError:
-                    logger.info(f"Failed to parse CRL URL: {crls[0]!r}")
-                else:
-                    # noinspection PyTypeChecker
-                    crl_distribution_point = urllib.parse.urlunsplit(
-                        (scheme, netloc, self.crl_path(), None, None)
-                    )
+            # Avoid client revocation checks that bypass the proxy.
+            crl_distribution_point = None
 
         # Add SNI or our local IP address.
         if conn_context.client.sni:
