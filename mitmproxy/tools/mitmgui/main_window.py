@@ -22,7 +22,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QThread, pyqtSignal, QObject, QByteArray, QSortFilterProxyModel, QRegularExpression
-from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPalette
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -4245,6 +4245,16 @@ class MitmGuiMainWindow(QMainWindow):
         self._session_table.setAlternatingRowColors(True)
         self._session_table.setShowGrid(False)
         self._session_table.setWordWrap(False)
+        session_font = QFont(self._session_table.font())
+        session_font.setPointSizeF(session_font.pointSizeF() + 2)
+        self._session_table.setFont(session_font)
+        self._session_table.setStyleSheet("font-size: 15px;")
+        session_palette = QPalette(self._session_table.palette())
+        active_selection = session_palette.brush(QPalette.ColorGroup.Active, QPalette.ColorRole.Highlight)
+        active_text = session_palette.brush(QPalette.ColorGroup.Active, QPalette.ColorRole.HighlightedText)
+        session_palette.setBrush(QPalette.ColorGroup.Inactive, QPalette.ColorRole.Highlight, active_selection)
+        session_palette.setBrush(QPalette.ColorGroup.Inactive, QPalette.ColorRole.HighlightedText, active_text)
+        self._session_table.setPalette(session_palette)
         self._session_table.verticalHeader().setVisible(False)
         self._session_table.setAutoScroll(False)  # prevent header from shifting on click
 
