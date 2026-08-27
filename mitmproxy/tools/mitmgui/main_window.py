@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -46,6 +47,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QStatusBar,
     QStyle,
@@ -1533,16 +1535,10 @@ class InspectorPanel(QWidget):
                     parts = lines[0].rstrip("\r").split(" ", 2)
                     req.method = parts[0]
                     if len(parts) > 1:
-                        from urllib.parse import urlsplit
+                        from urllib.parse import urlsplit, urlunsplit
                         parsed = urlsplit(parts[1])
-                        # Keep the request-target path verbatim, including repeated
-                        # leading slashes and a trailing semicolon.
-                        request_path = parsed.path
-                        if parsed.query:
-                            request_path += "?" + parsed.query
-                        if parsed.fragment:
-                            request_path += "#" + parsed.fragment
-                        req.path = request_path
+                        # Keep the path verbatim, including a trailing semicolon.
+                        req.path = urlunsplit(("", "", parsed.path, parsed.query, parsed.fragment))
                         if parsed.scheme:
                             req.scheme = parsed.scheme
                         if parsed.hostname:
@@ -1715,6 +1711,40 @@ class InspectorPanel(QWidget):
     @staticmethod
     def _escape_html(text: str) -> str:
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+class ReplaySequentiallyDialog(QDialog):
+    """Configure repeated sequential replay."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Replay Sequentially")
+        self.setMinimumWidth(300)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self.count = QSpinBox()
+        self.count.setRange(0, 2_147_483_647)
+        self.count.setValue(1)
+        self.count.setToolTip("0 means unlimited")
+        form.addRow("Count:", self.count)
+
+        self.interval = QDoubleSpinBox()
+        self.interval.setRange(0.0, 2_147_483_647.0)
+        self.interval.setDecimals(3)
+        self.interval.setSingleStep(0.1)
+        self.interval.setValue(1.0)
+        self.interval.setSuffix(" s")
+        form.addRow("Interval:", self.interval)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class FlowPropertiesDialog(QDialog):
@@ -3867,6 +3897,15 @@ class MitmGuiMainWindow(QMainWindow):
         self._shortcuts.append(act)
         self.addAction(act)
 
+        act = QAction(
+            "Replay Sequentially", self,
+            shortcut=QKeySequence("Shift+R"),
+            triggered=self._open_replay_sequentially,
+        )
+        act.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        self._shortcuts.append(act)
+        self.addAction(act)
+
         act = QAction("Compose", self, shortcut=QKeySequence("E"), triggered=self._compose_request)
         act.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         self._shortcuts.append(act)
@@ -4650,6 +4689,49 @@ class MitmGuiMainWindow(QMainWindow):
             self._master.view.add([new_flow])
             self._master.replay_flow(new_flow)
 
+    def _open_replay_sequentially(self) -> None:
+        """Shift+R: configure and start repeated replay for selected flows."""
+        flows = self._get_selected_flows()
+        if not flows:
+            return
+        dialog = ReplaySequentiallyDialog(self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.accepted.connect(
+            lambda: self._start_replay_sequentially(
+                flows, dialog.count.value(), dialog.interval.value()
+            )
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _start_replay_sequentially(self, flows: list, count: int, interval: float) -> None:
+        """Replay every selected flow once per interval until count is reached."""
+        timer = QTimer(self)
+        timer.setInterval(max(0, round(interval * 1000)))
+        sent = 0
+
+        def send_batch() -> None:
+            nonlocal sent
+            if count and sent >= count:
+                timer.stop()
+                timer.deleteLater()
+                return
+            for source_flow in flows:
+                new_flow = source_flow.copy()
+                new_flow.intercepted = False
+                new_flow.metadata["_replay_sequentially"] = True
+                self._master.view.add([new_flow])
+                self._master.replay_flow(new_flow)
+            sent += 1
+
+        timer.timeout.connect(send_batch)
+        self._replay_sequentially_timers = getattr(self, "_replay_sequentially_timers", [])
+        self._replay_sequentially_timers.append(timer)
+        timer.destroyed.connect(lambda: self._replay_sequentially_timers.remove(timer))
+        send_batch()
+        timer.start()
+
     def _abort_selected(self) -> None:
         """Abort (kill) selected live flows. Completed flows are ignored."""
         flows = self._get_selected_flows()
@@ -5243,6 +5325,8 @@ class MitmGuiMainWindow(QMainWindow):
         rp_selected.triggered.connect(self._replay_all_selected)
         rp_edit = replay_menu.addAction("Replay And Edit")
         rp_edit.triggered.connect(self._compose_request)
+        rp_sequential = replay_menu.addAction("Replay Sequentially")
+        rp_sequential.triggered.connect(self._open_replay_sequentially)
         rp_adv = replay_menu.addAction("Replay Advanced")
         rp_adv.setEnabled(False)
 
@@ -6090,6 +6174,8 @@ class MitmGuiMainWindow(QMainWindow):
         if flow in self._session_model._flows:
             return
         self._session_model.add_flow(flow)
+        if flow.metadata.get("_replay_sequentially"):
+            self._session_model.set_flow_fg_color(flow, QColor("#3d7aa1"))
         # Auto-scroll to bottom if auto-roll is enabled
         if self._auto_roll:
             self._session_table.scrollToBottom()
@@ -6141,8 +6227,10 @@ class MitmGuiMainWindow(QMainWindow):
         self._session_model.update_flow(flow)
         # Apply Auto Rule Color
         self._apply_auto_color(flow)
-        # Highlight flows that were remapped by Hosts Remapping
-        if getattr(flow, "_hosts_remapped", False):
+        # Keep Sequential Replay's color ahead of the Hosts Remapping color.
+        if flow.metadata.get("_replay_sequentially"):
+            self._session_model.set_flow_fg_color(flow, QColor("#3d7aa1"))
+        elif getattr(flow, "_hosts_remapped", False):
             self._session_model.set_flow_fg_color(flow, QColor("#3399FF"))
         # Intercepted flow received response → show it for editing
         if self._flow_state.get(fid) == "waiting_response" and flow.response:

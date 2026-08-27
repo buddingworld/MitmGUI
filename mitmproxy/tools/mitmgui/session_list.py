@@ -104,23 +104,15 @@ class SessionTableModel(QAbstractTableModel):
                 return f.request.method or ""
             return ""
         elif col == 6:  # Body
-            response = getattr(f, "response", None)
-            if response is None:
-                return "..."
-            # Before the response body arrives, show the announced size when
-            # available, but never report the temporary zero-byte value.
-            content = response.get_content(strict=False)
-            content_length = response.headers.get("content-length")
-            if content_length is not None:
-                try:
-                    formatted_length = self._format_size(int(content_length))
-                except ValueError:
-                    formatted_length = None
-                if formatted_length is not None:
-                    return f"{formatted_length}..." if content is None else formatted_length
-            if content is None:
-                return "..."
-            return self._format_size(len(content))
+            if hasattr(f, "response") and f.response:
+                # Use strict=False so malformed content-encoding headers (e.g.
+                # a charset like "utf-8" or a non-decodable binary body) don't
+                # raise; we only need the size here.
+                content = f.response.get_content(strict=False)
+                if content is None:
+                    return "0"
+                return self._format_size(len(content))
+            return "-"
         elif col == 7:  # Content-Type
             if hasattr(f, "response") and f.response:
                 return f.response.headers.get("content-type", "")
@@ -131,7 +123,7 @@ class SessionTableModel(QAbstractTableModel):
         if size < 1024:
             return str(size)
         elif size < 1024 * 1024:
-            return f"{size / 1024:.1f}KB"
+            return f"{size / 1024:.1f}K"
         else:
             return f"{size / (1024 * 1024):.1f}M"
 
