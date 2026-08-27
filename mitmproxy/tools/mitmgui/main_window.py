@@ -1533,10 +1533,16 @@ class InspectorPanel(QWidget):
                     parts = lines[0].rstrip("\r").split(" ", 2)
                     req.method = parts[0]
                     if len(parts) > 1:
-                        from urllib.parse import urlsplit, urlunsplit
+                        from urllib.parse import urlsplit
                         parsed = urlsplit(parts[1])
-                        # Keep the path verbatim, including a trailing semicolon.
-                        req.path = urlunsplit(("", "", parsed.path, parsed.query, parsed.fragment))
+                        # Keep the request-target path verbatim, including repeated
+                        # leading slashes and a trailing semicolon.
+                        request_path = parsed.path
+                        if parsed.query:
+                            request_path += "?" + parsed.query
+                        if parsed.fragment:
+                            request_path += "#" + parsed.fragment
+                        req.path = request_path
                         if parsed.scheme:
                             req.scheme = parsed.scheme
                         if parsed.hostname:
