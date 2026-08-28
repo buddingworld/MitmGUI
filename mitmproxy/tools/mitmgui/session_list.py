@@ -105,12 +105,20 @@ class SessionTableModel(QAbstractTableModel):
             return ""
         elif col == 6:  # Body
             if hasattr(f, "response") and f.response:
+                if f.response.timestamp_end is None:
+                    content_length = f.response.headers.get("content-length")
+                    if content_length is not None:
+                        try:
+                            return f"{self._format_size(int(content_length))}..."
+                        except ValueError:
+                            pass
+                    return "..."
                 # Use strict=False so malformed content-encoding headers (e.g.
                 # a charset like "utf-8" or a non-decodable binary body) don't
                 # raise; we only need the size here.
                 content = f.response.get_content(strict=False)
                 if content is None:
-                    return "0"
+                    return "..."
                 return self._format_size(len(content))
             return "-"
         elif col == 7:  # Content-Type

@@ -335,6 +335,21 @@ def _format_webforms(request: http.Request) -> str:
         return body
 
 
+def _raw_target_to_path(target: str) -> str:
+    if target == "*":
+        return target
+    if "://" in target:
+        authority_start = target.find("://") + 3
+        path_start = len(target)
+        for sep in "/?#":
+            pos = target.find(sep, authority_start)
+            if pos != -1:
+                path_start = min(path_start, pos)
+        path = target[path_start:]
+        return path or "/"
+    return target or "/"
+
+
 def _format_request_raw(flow, encoding: str = DEFAULT_ENCODING) -> str:
     r = flow.request
     if not r:
@@ -1535,10 +1550,9 @@ class InspectorPanel(QWidget):
                     parts = lines[0].rstrip("\r").split(" ", 2)
                     req.method = parts[0]
                     if len(parts) > 1:
-                        from urllib.parse import urlsplit, urlunsplit
+                        from urllib.parse import urlsplit
                         parsed = urlsplit(parts[1])
-                        # Keep the path verbatim, including a trailing semicolon.
-                        req.path = urlunsplit(("", "", parsed.path, parsed.query, parsed.fragment))
+                        req.path = _raw_target_to_path(parts[1])
                         if parsed.scheme:
                             req.scheme = parsed.scheme
                         if parsed.hostname:
@@ -3983,6 +3997,17 @@ class MitmGuiMainWindow(QMainWindow):
 
     # ── Menu bar ──
 
+    def _apply_session_list_font_size(self, size: int | None = None) -> None:
+        if size is None:
+            size = self._config.session_list_font_size
+        font = QFont(self._session_table.font())
+        font.setPointSize(int(size))
+        self._session_table.setFont(font)
+        self._session_table.viewport().setFont(font)
+        self._session_table.horizontalHeader().setFont(font)
+        self._session_table.verticalHeader().setFont(font)
+        self._session_table.viewport().update()
+
     def _setup_menu_bar(self) -> None:
         menubar = _FramelessMenuBar(self)
         menubar.setObjectName("mainMenuBar")
@@ -4245,10 +4270,7 @@ class MitmGuiMainWindow(QMainWindow):
         self._session_table.setAlternatingRowColors(True)
         self._session_table.setShowGrid(False)
         self._session_table.setWordWrap(False)
-        session_font = QFont(self._session_table.font())
-        session_font.setPointSizeF(session_font.pointSizeF() + 2)
-        self._session_table.setFont(session_font)
-        self._session_table.setStyleSheet("font-size: 15px;")
+        self._apply_session_list_font_size()
         session_palette = QPalette(self._session_table.palette())
         active_selection = session_palette.brush(QPalette.ColorGroup.Active, QPalette.ColorRole.Highlight)
         active_text = session_palette.brush(QPalette.ColorGroup.Active, QPalette.ColorRole.HighlightedText)
@@ -6050,12 +6072,14 @@ class MitmGuiMainWindow(QMainWindow):
 
         dlg = OptionsDialog(self._config, self)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        dlg.finished.connect(
-            lambda result: self._restart_proxy()
-            if result == QDialog.DialogCode.Accepted and dlg.was_modified
-            else None
-        )
+        dlg.session_list_font_size_changed.connect(self._apply_session_list_font_size)
+        dlg.finished.connect(lambda result: self._on_options_finished(dlg, result))
         dlg.show()
+
+    def _on_options_finished(self, dlg, result: int) -> None:
+        self._apply_session_list_font_size()
+        if result == QDialog.DialogCode.Accepted and dlg.was_modified:
+            self._restart_proxy()
 
     def _restart_proxy(self) -> None:
         """Apply updated config and restart the proxy listener on the new port."""

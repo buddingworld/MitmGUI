@@ -6,7 +6,7 @@ import random
 import string
 import datetime
 
-from PyQt6.QtCore import Qt, QPointF
+from PyQt6.QtCore import Qt, QPointF, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap, QFont, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QSlider,
+    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -31,6 +33,8 @@ from mitmproxy.tools.mitmgui.config import AppConfig
 
 class OptionsDialog(QDialog):
     """Configuration dialog with Https / Connections / Gateway tabs."""
+
+    session_list_font_size_changed = pyqtSignal(int)
 
     def __init__(self, config: AppConfig, parent=None):
         super().__init__(parent)
@@ -120,6 +124,22 @@ class OptionsDialog(QDialog):
         )
         self._ssl_insecure_cb.setChecked(self._config.ssl_insecure)
         layout.addWidget(self._ssl_insecure_cb)
+
+        current_font_size = self._config.session_list_font_size
+        font_row = QHBoxLayout()
+        font_row.addWidget(QLabel("Session List Font Size"))
+        self._session_font_slider = QSlider(Qt.Orientation.Horizontal)
+        self._session_font_slider.setRange(8, 32)
+        self._session_font_slider.setValue(current_font_size)
+        self._session_font_spin = QSpinBox()
+        self._session_font_spin.setRange(8, 32)
+        self._session_font_spin.setValue(current_font_size)
+        self._session_font_slider.valueChanged.connect(self._session_font_spin.setValue)
+        self._session_font_spin.valueChanged.connect(self._session_font_slider.setValue)
+        self._session_font_slider.valueChanged.connect(self.session_list_font_size_changed)
+        font_row.addWidget(self._session_font_slider, 1)
+        font_row.addWidget(self._session_font_spin)
+        layout.addLayout(font_row)
 
         layout.addStretch()
         return w
@@ -641,6 +661,7 @@ class OptionsDialog(QDialog):
 
         self._config.auto_adjust_content_length = self._cl_checkbox.isChecked()
         self._config.ssl_insecure = self._ssl_insecure_cb.isChecked()
+        self._config.session_list_font_size = self._session_font_spin.value()
 
         # SendTo: filter empty rows (name or address blank = empty)
         sendto_entries = []
@@ -653,6 +674,10 @@ class OptionsDialog(QDialog):
 
         self._config.save()
         self.accept()
+
+    def reject(self) -> None:
+        self._config._data["settings"] = dict(self._original_data["settings"])
+        super().reject()
 
     @property
     def was_modified(self) -> bool:

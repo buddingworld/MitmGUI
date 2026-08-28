@@ -41,6 +41,7 @@ class AppConfig:
             "raw_encoding": "utf-8",
             "raw_font_zoom": -2,  # QScintilla zoom level for Raw / New Session
             "raw_word_wrap": True,  # Word Wrap for Raw editors (on by default)
+            "session_list_font_size": 15,
         },
         "sendto": [
             {"name": "Fiddler", "address": "http://127.0.0.1:8888"},
@@ -207,6 +208,14 @@ class AppConfig:
     @raw_word_wrap.setter
     def raw_word_wrap(self, val: bool) -> None:
         self._data["settings"]["raw_word_wrap"] = bool(val)
+
+    @property
+    def session_list_font_size(self) -> int:
+        return int(self._data["settings"].get("session_list_font_size", 15))
+
+    @session_list_font_size.setter
+    def session_list_font_size(self, val: int) -> None:
+        self._data["settings"]["session_list_font_size"] = int(val)
 
     # ── SendTo ──
 
