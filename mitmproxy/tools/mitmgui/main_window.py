@@ -22,7 +22,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QThread, pyqtSignal, QObject, QByteArray, QSortFilterProxyModel, QRegularExpression
-from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QCursor, QFont, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPalette
+from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QCursor, QFont, QFontMetrics, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPalette
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -4006,6 +4006,12 @@ class MitmGuiMainWindow(QMainWindow):
         self._session_table.viewport().setFont(font)
         self._session_table.horizontalHeader().setFont(font)
         self._session_table.verticalHeader().setFont(font)
+        # Keep row height and header height in sync with the font, so the
+        # list stays readable when the font is scaled very large or small.
+        metrics = QFontMetrics(font)
+        self._session_table.verticalHeader().setDefaultSectionSize(metrics.height() + 10)
+        self._session_table.horizontalHeader().setMinimumHeight(metrics.height() + 10)
+        self._session_table.horizontalHeader().setFixedHeight(metrics.height() + 12)
         self._session_table.viewport().update()
 
     def _setup_menu_bar(self) -> None:

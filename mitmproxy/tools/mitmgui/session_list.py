@@ -123,7 +123,10 @@ class SessionTableModel(QAbstractTableModel):
             return "-"
         elif col == 7:  # Content-Type
             if hasattr(f, "response") and f.response:
-                return f.response.headers.get("content-type", "")
+                content_type = f.response.headers.get("content-type", "")
+                if ";" in content_type:
+                    return content_type.split(";", 1)[0].strip()
+                return content_type
             return ""
         return ""
 

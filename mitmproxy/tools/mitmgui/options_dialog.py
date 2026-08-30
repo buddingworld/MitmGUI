@@ -130,6 +130,10 @@ class OptionsDialog(QDialog):
         font_row.addWidget(QLabel("Session List Font Size"))
         self._session_font_slider = QSlider(Qt.Orientation.Horizontal)
         self._session_font_slider.setRange(8, 32)
+        # PageStep=1 so clicking the groove steps by 1 instead of jumping by
+        # the default page step (10), e.g. 10 -> 11 not 10 -> 20.
+        self._session_font_slider.setPageStep(1)
+        self._session_font_slider.setSingleStep(1)
         self._session_font_slider.setValue(current_font_size)
         self._session_font_spin = QSpinBox()
         self._session_font_spin.setRange(8, 32)
