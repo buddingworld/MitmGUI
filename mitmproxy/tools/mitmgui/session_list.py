@@ -14,7 +14,8 @@ class SessionTableModel(QAbstractTableModel):
         ("URL", 300),
         ("Method", 60),
         ("Body", 80),
-        ("Content-Type", 130),
+        ("Content-Type", 87),
+        ("Info", 43),
     ]
 
     def __init__(self, parent=None):
@@ -58,6 +59,10 @@ class SessionTableModel(QAbstractTableModel):
                     return QColor("#cc6600")
                 elif status >= 500:
                     return QColor("#cc0000")
+            elif col == 8:  # Info column coloring (plugin fingerprint info)
+                color = self._info_color(f)
+                if color is not None:
+                    return color
         elif role == Qt.ItemDataRole.BackgroundRole:
             fid = getattr(f, "id", None)
             if fid in self._flow_colors:
@@ -128,7 +133,32 @@ class SessionTableModel(QAbstractTableModel):
                     return content_type.split(";", 1)[0].strip()
                 return content_type
             return ""
+        elif col == 8:  # Info (e.g. plugin fingerprint info)
+            meta = getattr(f, "metadata", None) or {}
+            info = meta.get("_plugin_info")
+            if isinstance(info, list):
+                return ", ".join(str(item.get("name", "")) for item in info)
+            return str(info) if info else ""
         return ""
+
+    @staticmethod
+    def _info_color(f) -> QColor | None:
+        """Pick a text color for the Info column based on fingerprint types.
+
+        Priority: CMS/API (red) > Editor (blue) > everything else (gray).
+        """
+        meta = getattr(f, "metadata", None) or {}
+        info = meta.get("_plugin_info")
+        if not info:
+            return None
+        if isinstance(info, list):
+            for item in info:
+                if str(item.get("type", "")).lower() in ("cms", "api"):
+                    return QColor("#cc0000")
+            for item in info:
+                if str(item.get("type", "")).lower() == "editor":
+                    return QColor("#1a66ff")
+        return QColor("#808080")
 
     def _format_size(self, size: int) -> str:
         if size < 1024:

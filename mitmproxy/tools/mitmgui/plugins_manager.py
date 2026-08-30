@@ -119,6 +119,22 @@ class PluginViewAPI:
             return
         self._addon.bridge.set_flow_color.emit(fid, str(color))
 
+    def set_info(self, flow, info) -> None:
+        """Set the session-list Info column value for a flow.
+
+        ``info`` may be a plain string or a list of ``{"name", "type"}`` dicts.
+        A list is rendered with color priority CMS/API (red) > Editor (blue) >
+        anything else (light gray). Stashed in flow metadata so it survives
+        flows added to the list after this call.
+        """
+        if not getattr(flow, "metadata", None):
+            flow.metadata = {}
+        flow.metadata["_plugin_info"] = info
+        fid = getattr(flow, "id", None)
+        if fid is None or self._addon.bridge is None:
+            return
+        self._addon.bridge.set_flow_info.emit(str(fid))
+
 
 class PluginLogAPI:
     """Write to the Logs window (Plugin tab). Thread-safe via the GUI bridge."""

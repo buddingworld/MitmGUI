@@ -1813,6 +1813,20 @@ class FlowPropertiesDialog(QDialog):
         total = _duration(req_ts, resp_end) if resp_end else _duration(req_ts, resp_start)
         form.addRow("Total Duration:", QLabel(total))
 
+        # Flow metadata written by plugins (e.g. fingerprint results stored
+        # under the key "Finger"). Internal keys starting with "_" are hidden.
+        meta = getattr(f, "metadata", None) or {}
+        for key in sorted(meta):
+            if key.startswith("_"):
+                continue
+            value = meta[key]
+            if isinstance(value, list):
+                value = ", ".join(
+                    str(v.get("name", v)) if isinstance(v, dict) else str(v)
+                    for v in value
+                )
+            form.addRow(f"{key}:", QLabel(str(value)))
+
         layout.addLayout(form)
         layout.addStretch()
 
@@ -3042,12 +3056,13 @@ class LogsDialog(QDialog):
 
     LOG_CATEGORIES = ["Plugin", "Info", "Error", "Debug"]
     TIME_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
-    # Plugin tab gets richer columns; the others keep 时间/Message.
+    # Plugin tab gets a From column; the other tabs are the same shape
+    # (Time / Type / Message / Comment) but without the From column.
     COLUMNS = {
         "Plugin": ["Time", "From", "Type", "Message", "Comment"],
-        "Info": ["时间", "Message"],
-        "Error": ["时间", "Message"],
-        "Debug": ["时间", "Message"],
+        "Info": ["Time", "Type", "Message", "Comment"],
+        "Error": ["Time", "Type", "Message", "Comment"],
+        "Debug": ["Time", "Type", "Message", "Comment"],
     }
 
     def __init__(self, parent=None):
@@ -3081,10 +3096,12 @@ class LogsDialog(QDialog):
         export_btn = QPushButton("Export")
         self._tabs.setCornerWidget(export_btn, Qt.Corner.TopRightCorner)
 
-    def append_log(self, category: str, message: str) -> None:
-        """Append a log line to a 时间/Message category table."""
+    def append_log(self, category: str, message: str, log_type: str = "Info",
+                   comment=None) -> None:
+        """Append a log line to a non-Plugin category table
+        (Time / Type / Message / Comment)."""
         table = self._tables.get(category)
-        if table is None or table.columnCount() != 2:
+        if table is None or table.columnCount() != 4:
             return
         now = datetime.now().strftime(self.TIME_FORMAT)[:-3]
         # Sorting must be disabled while inserting, otherwise Qt re-sorts on
@@ -3093,7 +3110,9 @@ class LogsDialog(QDialog):
         row = table.rowCount()
         table.insertRow(row)
         table.setItem(row, 0, QTableWidgetItem(now))
-        table.setItem(row, 1, QTableWidgetItem(str(message)))
+        table.setItem(row, 1, QTableWidgetItem(str(log_type)))
+        table.setItem(row, 2, QTableWidgetItem(str(message)))
+        table.setItem(row, 3, QTableWidgetItem(str(comment) if comment else ""))
         table.setSortingEnabled(True)
 
     def append_plugin_log(self, from_name: str, log_type: str,
@@ -3124,6 +3143,7 @@ class _PluginBridge(QObject):
     log = pyqtSignal(str, str, str, object)  # from, type, message, comment
     new_session = pyqtSignal()
     set_flow_color = pyqtSignal(str, str)  # flow_id, color hex
+    set_flow_info = pyqtSignal(str)  # flow_id
 
 
 class _CenteredCheckDelegate(QStyledItemDelegate):
@@ -3864,6 +3884,7 @@ class MitmGuiMainWindow(QMainWindow):
         self._plugin_bridge.log.connect(self._append_plugin_log)
         self._plugin_bridge.new_session.connect(self._open_new_session_dialog)
         self._plugin_bridge.set_flow_color.connect(self._set_plugin_flow_color)
+        self._plugin_bridge.set_flow_info.connect(self._set_plugin_flow_info)
         self._master.plugins_addon.bridge = self._plugin_bridge
 
         # Frameless window: the menu bar strip doubles as the title bar
@@ -4298,6 +4319,11 @@ class MitmGuiMainWindow(QMainWindow):
         )
         self._session_header.set_dark(self._config.theme in _DARK_THEMES)
         self._session_table.setHorizontalHeader(self._session_header)
+        # Qt6's QTableView.setSortingEnabled() does not reliably enable section
+        # clicking on a custom header, so enable it explicitly here (otherwise
+        # clicking a column header cannot change the sort order).
+        self._session_header.setSectionsClickable(True)
+        self._session_header.setSortIndicatorShown(True)
 
         # Sorting: click column header to sort
         self._session_table.setSortingEnabled(True)
@@ -5991,6 +6017,15 @@ class MitmGuiMainWindow(QMainWindow):
         for f in self._session_model._flows:
             if getattr(f, "id", None) == flow_id:
                 self._session_model.set_flow_color(f, QColor(color_hex))
+                break
+
+    def _set_plugin_flow_info(self, flow_id: str) -> None:
+        """Slot for the plugin bridge: repaint a session row after its Info
+        column changed (GUI thread). The Info text itself is read from the
+        flow metadata directly by the model."""
+        for f in self._session_model._flows:
+            if getattr(f, "id", None) == flow_id:
+                self._session_model.update_flow(f)
                 break
 
     def _open_plugins_dialog(self) -> None:
