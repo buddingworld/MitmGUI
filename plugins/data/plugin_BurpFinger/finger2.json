@@ -1,0 +1,32 @@
+[
+  {
+    "name": "ClarIDy webpac",
+    "type": "CMS",
+    "rules": [
+      {
+        "location": "body",
+        "match": [
+          "get_single_search_form.cfm"
+        ]
+      },
+      {
+        "location": "body",
+        "match": [
+          "getBorrowInfo.cfm"
+        ]
+      }
+    ]
+  },
+   {
+    "name": "科大奥锐 ustcori",
+    "type": "CMS",
+    "rules": [
+      {
+        "location": "body",
+        "match": [
+          "技术支持：科大奥锐"
+        ]
+      }
+    ]
+  }
+]

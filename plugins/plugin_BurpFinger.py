@@ -7,9 +7,10 @@
 - 命中结果写入会话列表新增的 Info 列：
     * CMS / API                    -> 红色
     * Editor                       -> 蓝色
-    * Language / Middleware 等其它类型 -> 浅灰色
-- 规则库：data/plugin_BurpFinger/fingerprints.json（与 burp-finger 相同，
-  rules.index 仅用于说明规则来源）。
+    * Middleware 等其它类型          -> 浅灰色
+- 不加载、标记或记录 Type 为 Language 的规则。
+- 规则库：data/plugin_BurpFinger/ 目录下的指纹文件（默认 fingerprints.json，
+  由 rules.index 逐行列出要加载的文件，# 开头为注释，可自行追加指纹文件）。
 
 性能优化（参考源项目 MatchingEngine/PassiveScanner 并针对 Python 版改进）：
   1. 规则加载时预编译正则、按匹配位置（header / body / hash）分组索引；
@@ -30,6 +31,7 @@ import threading
 
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 _DATA_DIR = os.path.join(_PLUGIN_DIR, "data", "plugin_BurpFinger")
+_INDEX_FILE = os.path.join(_DATA_DIR, "rules.index")
 _RULES_FILE = os.path.join(_DATA_DIR, "fingerprints.json")
 
 # 超过该大小的非图标 body 跳过匹配（图标类内容很小，不受此限制）。
@@ -229,17 +231,46 @@ class Plugin:
             self._scanned.clear()
 
     def _load_rules(self, api) -> None:
+        # 读取 rules.index 中列出的全部指纹文件（每行一个文件名，# 开头为注释；
+        # 缺失时回退到默认的 fingerprints.json）
+        files: list[str] = []
         try:
-            with open(_RULES_FILE, "r", encoding="utf-8") as f:
-                fingerprints = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            api.logs.error(f"加载规则失败: {_RULES_FILE} ({e})")
+            with open(_INDEX_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        files.append(line)
+        except OSError:
+            files = [os.path.basename(_RULES_FILE)]
+        if not files:
+            files = [os.path.basename(_RULES_FILE)]
+
+        fingerprints = []
+        for name in files:
+            path = os.path.join(_DATA_DIR, name)
+            if not os.path.isfile(path):
+                api.logs.error(f"规则文件不存在: {name}")
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                api.logs.error(f"加载规则失败: {name} ({e})")
+                continue
+            if isinstance(data, list):
+                fingerprints.extend(data)
+            else:
+                api.logs.error(f"规则文件格式错误(应为数组): {name}")
+        if not fingerprints:
             return
         self._header_rules = []
         self._body_rules = []
         self._hash_rules = []
         self._status_rules = []
         for fp in fingerprints or []:
+            # 不加载 / 标记 / 记录 Language 类型
+            if str(fp.get("type", "")).lower() == "language":
+                continue
             for rule in fp.get("rules") or []:
                 rule = dict(rule)
                 if rule.get("match"):
@@ -255,7 +286,8 @@ class Plugin:
                     bucket.append((fp, rule))
         self._loaded = True
         api.logs.info(
-            f"规则已加载: {len(self._header_rules)} header / "
+            f"规则已加载({len(files)} 个文件): "
+            f"{len(self._header_rules)} header / "
             f"{len(self._body_rules)} body / {len(self._hash_rules)} hash / "
             f"{len(self._status_rules)} status"
         )
