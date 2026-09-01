@@ -47,6 +47,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpacerItem,
     QSpinBox,
     QSplitter,
     QStatusBar,
@@ -2276,7 +2277,7 @@ class AutoRuleDialog(QDialog):
         "Response.Body",
     ]
     MATCH_TYPES = ["String", "Regex"]
-    ACTIONS = ["Color", "Response With", "Replace"]
+    ACTIONS = ["Color", "Response With", "Response With File", "SaveToFile", "Replace"]
     REPLACE_INS = [
         "URL",
         "Request.Headers",
@@ -2343,12 +2344,40 @@ class AutoRuleDialog(QDialog):
         self._color_row = form.rowCount() - 1
 
         self._response_with_edit = _ResponseTextEdit()
-        # Show ~7 lines in the dialog; double-click opens a dedicated editor
-        self._response_with_edit.setFixedHeight(
+        # Minimum ~7 lines; grows with the dialog when the window is enlarged
+        # (vertical size policy is Expanding).
+        self._response_with_edit.setMinimumHeight(
             self._response_with_edit.fontMetrics().lineSpacing() * 7 + 12
+        )
+        self._response_with_edit.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         form.addRow("Value", self._response_with_edit)
         self._resp_row = form.rowCount() - 1
+
+        # "Response With File": single-line path + file picker button
+        self._file_path_edit = QLineEdit()
+        self._file_btn = QPushButton("选择文件...")
+        self._file_btn.clicked.connect(self._on_browse_file)
+        file_container = QWidget()
+        file_lay = QHBoxLayout(file_container)
+        file_lay.setContentsMargins(0, 0, 0, 0)
+        file_lay.addWidget(self._file_path_edit, 1)
+        file_lay.addWidget(self._file_btn)
+        form.addRow("Value", file_container)
+        self._file_row = form.rowCount() - 1
+
+        # "SaveToFile": single-line directory + folder picker button
+        self._savedir_edit = QLineEdit()
+        self._savedir_btn = QPushButton("选择文件夹...")
+        self._savedir_btn.clicked.connect(self._on_browse_savedir)
+        savedir_container = QWidget()
+        savedir_lay = QHBoxLayout(savedir_container)
+        savedir_lay.setContentsMargins(0, 0, 0, 0)
+        savedir_lay.addWidget(self._savedir_edit, 1)
+        savedir_lay.addWidget(self._savedir_btn)
+        form.addRow("Value", savedir_container)
+        self._savedir_row = form.rowCount() - 1
 
         self._replace_in_cb = QComboBox()
         self._replace_in_cb.addItems(self.REPLACE_INS)
@@ -2367,8 +2396,13 @@ class AutoRuleDialog(QDialog):
 
         self._form = form
         layout.addLayout(form)
-        # Keep the fields at the top of the dialog and the buttons at the bottom
-        layout.addStretch(1)
+        # Keep the fields at the top of the dialog and the buttons at the
+        # bottom. The spacer is neutralized while "Response With" is active so
+        # its value editor absorbs the extra vertical space instead.
+        self._spacer = QSpacerItem(
+            0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding
+        )
+        layout.addSpacerItem(self._spacer)
 
         # ── Prefill from an existing rule ──
         if rule:
@@ -2383,6 +2417,14 @@ class AutoRuleDialog(QDialog):
                 v = rule.get("value")
                 if isinstance(v, str):
                     self._response_with_edit.setPlainText(v)
+            elif action == "Response With File":
+                v = rule.get("value")
+                if isinstance(v, str):
+                    self._file_path_edit.setText(v)
+            elif action == "SaveToFile":
+                v = rule.get("value")
+                if isinstance(v, str):
+                    self._savedir_edit.setText(v)
             else:  # Replace
                 v = rule.get("value")
                 if isinstance(v, dict):
@@ -2409,12 +2451,40 @@ class AutoRuleDialog(QDialog):
     def _on_action_changed(self, action: str) -> None:
         is_color = action == "Color"
         is_resp = action == "Response With"
+        is_file = action == "Response With File"
+        is_savedir = action == "SaveToFile"
         is_replace = action == "Replace"
         self._form.setRowVisible(self._color_row, is_color)
         self._form.setRowVisible(self._resp_row, is_resp)
+        self._form.setRowVisible(self._file_row, is_file)
+        self._form.setRowVisible(self._savedir_row, is_savedir)
         for row in (self._replace_in_row, self._replace_type_row,
                     self._replace_source_row, self._replace_dest_row):
             self._form.setRowVisible(row, is_replace)
+        # While "Response With" is active let the value editor absorb the
+        # extra vertical space; otherwise keep the fields compact at the top.
+        self._spacer.changeSize(
+            0, 0, QSizePolicy.Policy.Minimum,
+            QSizePolicy.Policy.Minimum if is_resp else QSizePolicy.Policy.Expanding,
+        )
+        if self.layout() is not None:
+            self.layout().invalidate()
+
+    def _on_browse_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Response File",
+            self._file_path_edit.text().strip() or os.getcwd(),
+        )
+        if path:
+            self._file_path_edit.setText(path)
+
+    def _on_browse_savedir(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select Save Directory",
+            self._savedir_edit.text().strip() or os.getcwd(),
+        )
+        if directory:
+            self._savedir_edit.setText(directory)
 
     def _on_save(self) -> None:
         match_value = self._match_value_edit.text().strip()
@@ -2426,6 +2496,10 @@ class AutoRuleDialog(QDialog):
             value = self._color_combo.currentText()
         elif action == "Response With":
             value = self._response_with_edit.toPlainText()
+        elif action == "Response With File":
+            value = self._file_path_edit.text().strip()
+        elif action == "SaveToFile":
+            value = self._savedir_edit.text().strip()
         else:  # Replace
             source = self._replace_source_edit.text()
             if not source:
@@ -3974,7 +4048,7 @@ class MitmGuiMainWindow(QMainWindow):
             self._shortcuts.append(act)
             self.addAction(act)
 
-        # F12: toggle system proxy (same as clicking Config)
+        # F12: toggle system proxy (same as clicking Capture)
         act = QAction("ProxyToggle", self, shortcut=QKeySequence("F12"), triggered=self._f12_toggle_proxy)
         act.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
         self._shortcuts.append(act)
@@ -4221,7 +4295,7 @@ class MitmGuiMainWindow(QMainWindow):
 
         toolbar.addSeparator()
 
-        self._proxy_toggle_action = toolbar.addAction("\u25b6 Config")
+        self._proxy_toggle_action = toolbar.addAction("\u25b6 Capture")
         self._proxy_toggle_action.setToolTip("Toggle system proxy")
         self._proxy_toggle_action.setCheckable(True)
         self._proxy_toggle_action.triggered.connect(self._toggle_system_proxy)
@@ -4271,9 +4345,9 @@ class MitmGuiMainWindow(QMainWindow):
     def _update_proxy_icon(self) -> None:
         # Use fixed-width prefix so button position does not shift
         if self._proxy_toggle_action.isChecked():
-            self._proxy_toggle_action.setText("\u23f8 Config")
+            self._proxy_toggle_action.setText("\u23f8 Capture")
         else:
-            self._proxy_toggle_action.setText("\u25b6 Config")
+            self._proxy_toggle_action.setText("\u25b6 Capture")
 
     # ── Central widget ──
 
@@ -5291,7 +5365,7 @@ class MitmGuiMainWindow(QMainWindow):
             self._session_model.set_flow_color(flow, color)
 
     def _f12_toggle_proxy(self) -> None:
-        """F12: toggle system proxy (same as clicking Config button)."""
+        """F12: toggle system proxy (same as clicking the Capture button)."""
         new_state = not self._proxy_toggle_action.isChecked()
         self._proxy_toggle_action.setChecked(new_state)
         self._toggle_system_proxy(new_state)
@@ -6063,24 +6137,45 @@ class MitmGuiMainWindow(QMainWindow):
         except OSError:
             return False
 
+    @staticmethod
+    def _normalize_proxy_host(host: str) -> str:
+        # Addresses that mean "all interfaces" are reachable via loopback.
+        return "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
+
+    def _get_local_proxy_address(self) -> tuple[str, int]:
+        """Host/port of the local mitmproxy listener for the system proxy.
+
+        Prefers the regular-mode server; falls back to the first server
+        bound to a port (e.g. an upstream-mode listener) and finally to the
+        configured listen options. This avoids ever using a hardcoded port,
+        both while the proxy is still starting (empty server list) and when
+        no regular mode is configured.
+        """
+        opts = self._master.options
+        default_addr = (self._normalize_proxy_host(opts.listen_host), int(opts.listen_port))
+        first_bound = None
+        try:
+            servers = self._master.proxyserver.servers
+        except Exception:
+            return default_addr
+        for s in servers:
+            port = s.mode.listen_port(opts.listen_port)
+            if port is None:
+                continue
+            host = self._normalize_proxy_host(s.mode.listen_host(opts.listen_host))
+            if "regular" in s.mode.full_spec:
+                return host, int(port)
+            if first_bound is None:
+                first_bound = (host, int(port))
+        return first_bound or default_addr
+
     def _set_proxy_enabled(self, enabled: bool) -> None:
         if sys.platform != "win32":
             return
         import ctypes
         import winreg
 
-        host = "127.0.0.1"
-        port = None
-        servers = self._master.proxyserver.servers
-        if servers:
-            for s in servers:
-                if "regular" in s.mode.full_spec:
-                    port = s.mode.listen_port(self._master.options.listen_port)
-                    host = s.mode.listen_host(self._master.options.listen_host) or "127.0.0.1"
-                    break
-        if port is None:
-            port = 8080
-
+        host, port = self._get_local_proxy_address()
         proxy_server = f"{host}:{port}"
 
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"

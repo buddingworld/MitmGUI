@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 
 from mitmproxy import addons
 from mitmproxy import hooks
@@ -133,7 +134,8 @@ class _AutoRulesAddon:
                   | "Response.Header" | "Response.Body",   # match location
           "match_type": "String" | "Regex",
           "match_value": "...",                            # match condition
-          "action": "Color" | "Response With" | "Replace",
+          "action": "Color" | "Response With" | "Response With File"
+                    | "SaveToFile" | "Replace",
           "value": ...                                     # action payload
         }
     - ``Color`` is applied by the GUI (session list), not by this addon.
@@ -142,6 +144,13 @@ class _AutoRulesAddon:
       server; rules matched on the response side overwrite the body. The
       payload is either a plain body text or a full raw HTTP response
       packet (starting with "HTTP/") which is replayed verbatim.
+    - ``Response With File`` works like ``Response With`` but the payload
+      comes from a file (``value`` is the file path). If the file starts
+      with "HTTP/" it is parsed as a raw response packet and replayed
+      verbatim; otherwise a 200 OK response is built with a Content-Type
+      guessed from the file extension (unknown -> application/octet-stream).
+    - ``SaveToFile`` saves the matching flow to ``value`` (a directory) as
+      ``Session_{timestamp}.txt`` once its response is available.
     - ``Replace`` rewrites the location selected by ``value.in``:
         value = {
           "in": "URL" | "Request.Headers" | "Request.Body"
@@ -161,6 +170,7 @@ class _AutoRulesAddon:
     def __init__(self):
         self._rules: list[dict] = []
         self._last_mtime: float | None = None
+        self._save_pending: dict[str, str] = {}  # flow id -> save directory
         self.reload()
 
     def reload(self) -> None:
@@ -412,8 +422,9 @@ class _AutoRulesAddon:
                 self._apply_replace_rule(flow, rule, message)
 
     def _apply_response_with(self, flow) -> None:
-        """Answer the first matching Response With rule directly with the
-        configured payload, without contacting the web server.
+        """Answer the first matching Response With / Response With File rule
+        directly with the configured payload, without contacting the web
+        server.
 
         Only rules whose match location lives on the request side
         (Request.Url / Request.Header) can be evaluated here, since the
@@ -422,15 +433,19 @@ class _AutoRulesAddon:
         for rule in self._rules:
             if not rule.get("enabled", True):
                 continue
-            if rule.get("action") != "Response With":
+            action = rule.get("action")
+            if action not in ("Response With", "Response With File"):
                 continue
             text = self._target_text(flow, rule.get("item", ""))
             if not self._match_rule(rule, text):
                 continue
             value = rule.get("value")
-            if not isinstance(value, str):
+            if not isinstance(value, str) or not value:
                 return
-            flow.response = self._response_with_value(value)
+            if action == "Response With File":
+                flow.response = self._response_from_file(value)
+            else:
+                flow.response = self._response_with_value(value)
             return
 
     @staticmethod
@@ -476,14 +491,146 @@ class _AutoRulesAddon:
                 {"Content-Type": "text/plain; charset=utf-8"},
             )
 
+    # Content types guessed from the file extension for "Response With File".
+    _FILE_CONTENT_TYPES = {
+        ".json": "application/json",
+        ".html": "text/html",
+        ".htm": "text/html",
+        ".css": "text/css",
+        ".js": "text/javascript",
+        ".mjs": "text/javascript",
+        ".xml": "application/xml",
+        ".txt": "text/plain",
+        ".svg": "image/svg+xml",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".ico": "image/x-icon",
+        ".pdf": "application/pdf",
+        ".woff": "font/woff",
+        ".woff2": "font/woff2",
+        ".zip": "application/zip",
+        ".mp4": "video/mp4",
+    }
+
+    def _response_from_file(self, path: str):
+        """Build the response object for a Response With File rule.
+
+        If the file starts with "HTTP/", it is parsed as a raw response
+        packet and replayed verbatim (status line, headers and body are
+        taken from the file). Otherwise a 200 OK response is built with a
+        Content-Type guessed from the file extension; unknown extensions
+        get "application/octet-stream".
+        """
+        from mitmproxy import http
+        from mitmproxy.net.http import http1
+
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            return http.Response.make(
+                500,
+                f"AutoRule: cannot read file '{path}' ({e})".encode("utf-8"),
+                {"Content-Type": "text/plain; charset=utf-8"},
+            )
+
+        head = data.lstrip(b"\xef\xbb\xbf \t\r\n")
+        if not head.startswith(b"HTTP/"):
+            ext = os.path.splitext(path)[1].lower()
+            ct = self._FILE_CONTENT_TYPES.get(ext, "application/octet-stream")
+            return http.Response.make(200, data, {"Content-Type": ct})
+
+        try:
+            # Split head/body at the first empty line (CRLF or LF); the raw
+            # body bytes are kept verbatim so binary payloads survive.
+            i_crlf = data.find(b"\r\n\r\n")
+            i_lf = data.find(b"\n\n")
+            candidates = [(i, 4) for i in (i_crlf,) if i != -1]
+            candidates += [(i, 2) for i in (i_lf,) if i != -1]
+            if candidates:
+                sep, skip = min(candidates)
+                head_lines = data[:sep].splitlines()
+                body = data[sep + skip:]
+            else:
+                head_lines, body = data.splitlines(), b""
+            resp = http1.read_response_head(head_lines)
+            resp.content = body
+            # Framing headers must match the actual body we serve.
+            resp.headers.pop("Content-Length", None)
+            resp.headers.pop("Transfer-Encoding", None)
+            resp.headers["Content-Length"] = str(len(body))
+            return resp
+        except (ValueError, IndexError, TypeError):
+            ext = os.path.splitext(path)[1].lower()
+            ct = self._FILE_CONTENT_TYPES.get(ext, "application/octet-stream")
+            return http.Response.make(200, data, {"Content-Type": ct})
+
+    def _save_flow_to_file(self, flow, directory: str) -> None:
+        """Save a matching flow to ``directory`` as Session_{timestamp}.txt."""
+        try:
+            os.makedirs(directory, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S") + f"-{int(time.time() * 1000) % 1000:03d}"
+            path = os.path.join(directory, f"Session_{ts}.txt")
+            lines = []
+
+            req = getattr(flow, "request", None)
+            if req is not None:
+                lines.append("================ Request ================")
+                lines.append(f"{req.method} {req.url} {req.http_version}")
+                lines.extend(f"{k}: {v}" for k, v in req.headers.items())
+                lines.append("")
+                try:
+                    lines.append(req.get_text(strict=False) or "")
+                except ValueError:
+                    lines.append(f"<binary body, {len(req.raw_content or b'')} bytes>")
+
+            resp = getattr(flow, "response", None)
+            if resp is not None:
+                lines.append("================ Response ================")
+                lines.append(f"{resp.http_version} {resp.status_code} {resp.reason}")
+                lines.extend(f"{k}: {v}" for k, v in resp.headers.items())
+                lines.append("")
+                try:
+                    lines.append(resp.get_text(strict=False) or "")
+                except ValueError:
+                    lines.append(f"<binary body, {len(resp.raw_content or b'')} bytes>")
+
+            with open(path, "w", encoding="utf-8", errors="replace") as f:
+                f.write("\n".join(lines))
+        except OSError:
+            # Never break proxying because of a save failure.
+            pass
+
     def request(self, flow) -> None:
         from mitmproxy import http
         if not isinstance(flow, http.HTTPFlow):
             return
         self._refresh_rules_if_changed()
-        # Response With: return the configured payload without contacting the
-        # web server.
+        # Response With / Response With File: return the configured payload
+        # without contacting the web server.
         self._apply_response_with(flow)
+        # SaveToFile rules matching on the request side: if the flow was
+        # short-circuited above (response already present) save it now,
+        # otherwise remember the directory and save in the response hook.
+        for rule in self._rules:
+            if not rule.get("enabled", True):
+                continue
+            if rule.get("action") != "SaveToFile":
+                continue
+            if rule.get("item") not in ("Request.Url", "Request.Header"):
+                continue
+            text = self._target_text(flow, rule.get("item", ""))
+            if self._match_rule(rule, text):
+                value = rule.get("value")
+                if isinstance(value, str) and value:
+                    if flow.response is not None:
+                        self._save_flow_to_file(flow, value)
+                    else:
+                        self._save_pending[str(getattr(flow, "id", ""))] = value
+                break
         # Replace rules targeting the request side (URL / Request.*)
         self._apply_replace_matching(flow, {"URL", "Request.Headers", "Request.Body"})
 
@@ -492,15 +639,37 @@ class _AutoRulesAddon:
         if not isinstance(flow, http.HTTPFlow):
             return
         self._refresh_rules_if_changed()
-        # Response With: first matching rule whose item is a response location
+        # Response With / Response With File: first matching rule whose item
+        # is a response location
         rule = self._first_rule(flow, ("Response.Header", "Response.Body"))
-        if rule is not None and rule.get("action") == "Response With":
+        if rule is not None and rule.get("action") in ("Response With", "Response With File"):
             value = rule.get("value")
-            if isinstance(value, str) and flow.response is not None:
-                if value.lstrip("\ufeff \t\r\n").startswith("HTTP/"):
+            if isinstance(value, str) and value and flow.response is not None:
+                if rule.get("action") == "Response With File":
+                    flow.response = self._response_from_file(value)
+                elif value.lstrip("\ufeff \t\r\n").startswith("HTTP/"):
                     flow.response = self._response_with_value(value)
                 else:
                     flow.response.set_text(value)
+        # SaveToFile: request-side pending match or response-side match; the
+        # response is now available so the full exchange can be written.
+        save_dir = self._save_pending.pop(str(getattr(flow, "id", "")), None)
+        if save_dir is None:
+            for r in self._rules:
+                if not r.get("enabled", True):
+                    continue
+                if r.get("action") != "SaveToFile":
+                    continue
+                if r.get("item") not in ("Response.Header", "Response.Body"):
+                    continue
+                text = self._target_text(flow, r.get("item", ""))
+                if self._match_rule(r, text):
+                    value = r.get("value")
+                    if isinstance(value, str):
+                        save_dir = value
+                    break
+        if save_dir and flow.response is not None:
+            self._save_flow_to_file(flow, save_dir)
         # Replace rules targeting the response side (Response.Headers/Body);
         # the match item may live on either side of the flow.
         self._apply_replace_matching(
