@@ -4423,6 +4423,14 @@ class MitmGuiMainWindow(QMainWindow):
         act.triggered.connect(self._remove_selected)
         self._session_table.addAction(act)
 
+        # Ctrl+L: toggle lock state of selected sessions (locked sessions
+        # cannot be removed via right-click > Remove or the Delete key)
+        lock_act = QAction("LockSelected", self._session_table)
+        lock_act.setShortcut(QKeySequence("Ctrl+L"))
+        lock_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        lock_act.triggered.connect(self._toggle_lock_selected)
+        self._session_table.addAction(lock_act)
+
         # Right-click context menu
         self._session_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._session_table.customContextMenuRequested.connect(self._on_context_menu)
@@ -5453,6 +5461,11 @@ class MitmGuiMainWindow(QMainWindow):
         reset_action = mark_menu.addAction("Reset Color")
         reset_action.triggered.connect(lambda: self._color_selected(None))
         mark_menu.addSeparator()
+        lock_action = mark_menu.addAction("Locked")
+        lock_action.triggered.connect(lambda: self._set_selected_locked(True))
+        unlock_action = mark_menu.addAction("Unlocked")
+        unlock_action.triggered.connect(lambda: self._set_selected_locked(False))
+        mark_menu.addSeparator()
         for name, color in self._CTRL_COLORS_LIST:
             act = mark_menu.addAction(name)
             act.triggered.connect(lambda _checked, c=color: self._color_selected(c))
@@ -5552,8 +5565,41 @@ class MitmGuiMainWindow(QMainWindow):
         elif parts:
             QApplication.clipboard().setText(parts[0])
 
-    def _remove_selected(self) -> None:
+    # ── Session locking ──
+
+    @staticmethod
+    def _is_flow_locked(f) -> bool:
+        return bool((getattr(f, "metadata", None) or {}).get("_locked"))
+
+    @staticmethod
+    def _set_flow_locked(f, locked: bool) -> None:
+        if locked:
+            f.metadata["_locked"] = True
+        else:
+            f.metadata.pop("_locked", None)
+
+    def _set_selected_locked(self, locked: bool) -> None:
         flows = self._get_selected_flows()
+        if not flows:
+            return
+        for f in flows:
+            self._set_flow_locked(f, locked)
+            self._session_model.update_flow(f)
+
+    def _toggle_lock_selected(self) -> None:
+        """Ctrl+L: toggle lock state of the selected flows.
+
+        A mixed selection (locked + unlocked) becomes fully locked; a fully
+        locked selection becomes fully unlocked."""
+        flows = self._get_selected_flows()
+        if not flows:
+            return
+        self._set_selected_locked(any(not self._is_flow_locked(f) for f in flows))
+
+    def _remove_selected(self) -> None:
+        flows = [
+            f for f in self._get_selected_flows() if not self._is_flow_locked(f)
+        ]
         if not flows:
             return
         indices = []
@@ -5576,7 +5622,7 @@ class MitmGuiMainWindow(QMainWindow):
         selected_ids = set(f.id for f in self._get_selected_flows())
         to_remove = [
             (i, f) for i, f in enumerate(self._session_model._flows)
-            if f.id not in selected_ids
+            if f.id not in selected_ids and not self._is_flow_locked(f)
         ]
         self._session_model.beginResetModel()
         for row, f in reversed(to_remove):
@@ -6503,9 +6549,31 @@ class MitmGuiMainWindow(QMainWindow):
             self._session_model.set_flow_color(flow, color)
 
     def _clear_sessions(self) -> None:
-        self._session_model.clear()
-        self._master.view.clear()
-        self._selected_flow = None
+        locked = [f for f in self._session_model._flows if self._is_flow_locked(f)]
+        if not locked:
+            self._session_model.clear()
+            self._master.view.clear()
+            self._selected_flow = None
+            return
+        # Keep locked sessions; remove only the unlocked ones.
+        locked_ids = {f.id for f in locked}
+        model = self._session_model
+        model.beginResetModel()
+        model._flows = locked
+        model._flow_colors = {
+            fid: c for fid, c in model._flow_colors.items() if fid in locked_ids
+        }
+        model._flow_fg_colors = {
+            fid: c for fid, c in model._flow_fg_colors.items() if fid in locked_ids
+        }
+        model.endResetModel()
+        to_remove = [
+            f for f in list(self._master.view) if not self._is_flow_locked(f)
+        ]
+        if to_remove:
+            self._master.view.remove(to_remove)
+        if self._selected_flow is not None and self._selected_flow not in locked:
+            self._selected_flow = None
 
     def _open_custom_rules(self) -> None:
         """Open rules.py in a Python code editor dialog."""
@@ -6971,6 +7039,11 @@ def launch(args: Sequence[str] | None = None) -> int | None:
     proxy.options.update(client_replay_concurrency=-1)
 
     window = MitmGuiMainWindow(proxy, config)
+    window.show()
+
+    ret = app.exec()
+    proxy.stop()
+    return ret
     window.show()
 
     ret = app.exec()

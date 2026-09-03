@@ -133,12 +133,17 @@ class SessionTableModel(QAbstractTableModel):
                     return content_type.split(";", 1)[0].strip()
                 return content_type
             return ""
-        elif col == 8:  # Info (e.g. plugin fingerprint info)
+        elif col == 8:  # Info (e.g. plugin fingerprint info / lock mark)
             meta = getattr(f, "metadata", None) or {}
             info = meta.get("_plugin_info")
             if isinstance(info, list):
-                return ", ".join(str(item.get("name", "")) for item in info)
-            return str(info) if info else ""
+                text = ", ".join(str(item.get("name", "")) for item in info)
+            else:
+                text = str(info) if info else ""
+            if meta.get("_locked"):
+                # Small lock mark prefix for locked sessions
+                text = "\U0001F512 " + text if text else "\U0001F512"
+            return text
         return ""
 
     @staticmethod
