@@ -260,11 +260,23 @@ class HttpStream(layer.Layer):
                     "https" if self.context.client.tls else "http"
                 )
 
-        if self.mode is HTTPMode.regular and not (
+        if self.mode is HTTPMode.upstream:
+            proxy_mode = self.context.client.proxy_mode
+            assert isinstance(proxy_mode, UpstreamMode)
+            socks_upstream = proxy_mode.scheme.startswith("socks5")
+        else:
+            socks_upstream = False
+
+        if not (
             self.flow.request.is_http2 or self.flow.request.is_http3
+        ) and (
+            self.mode is HTTPMode.regular or socks_upstream
         ):
             # Set the request target to origin-form for HTTP/1, some servers don't support absolute-form requests.
             # see https://github.com/mitmproxy/mitmproxy/issues/1759
+            # A SOCKS5 upstream proxy is a plain byte tunnel, not an HTTP
+            # proxy, so the request reaches the web server as-is and must use
+            # origin-form there as well.
             self.flow.request.authority = ""
 
         # update host header in reverse proxy mode
