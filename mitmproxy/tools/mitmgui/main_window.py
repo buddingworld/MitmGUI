@@ -723,17 +723,26 @@ class _ScintillaTextEdit(QsciScintilla):
     message never rewrites the untouched line breaks of the original packet.
     """
 
-    def __init__(self, inspector_panel: "InspectorPanel | None" = None):
+    def __init__(
+        self,
+        inspector_panel: "InspectorPanel | None" = None,
+        wrap: bool | None = None,
+        persist_prefs: bool = True,
+    ):
         super().__init__()
         self._inspector = inspector_panel
+        self._persist_prefs = persist_prefs
         self.setReadOnly(True)
         self.setUtf8(True)
         # Word Wrap is user-configurable and persisted in the config file
-        # (enabled by default).
+        # (enabled by default).  Reused editors (e.g. the Tools window) pass
+        # an explicit wrap choice so the shared Raw preference is untouched.
         config = AppConfig()
+        if wrap is None:
+            wrap = config.raw_word_wrap
         self.setWrapMode(
             QsciScintilla.WrapMode.WrapWord
-            if config.raw_word_wrap
+            if wrap
             else QsciScintilla.WrapMode.WrapNone
         )
         # Hide the Scintilla margin strip (no line numbers / fold markers),
@@ -892,6 +901,8 @@ class _ScintillaTextEdit(QsciScintilla):
         self.SendScintilla(QsciScintillaBase.SCI_ENDUNDOACTION)
 
     def _save_zoom(self) -> None:
+        if not self._persist_prefs:
+            return
         config = AppConfig()
         config.raw_font_zoom = int(
             self.SendScintilla(QsciScintillaBase.SCI_GETZOOM)
@@ -3479,10 +3490,19 @@ class _DnsResolveWorker(QObject):
 
 
 class ToolsDialog(QDialog):
-    """Utility tools window: DNS, Unicode escapes, Base64, and URL codec."""
+    """Utility tools window: DNS, Unicode escapes, Base64, URL and Hex codec.
+
+    All text boxes reuse the Raw-tab editor (word wrap on by default).
+    """
 
     _DNS_TYPES = ["A", "CNAME", "AAAA", "MX", "NS", "TXT", "SOA", "PTR"]
     _DNS_METHODS = ["UDP", "TCP", "DOH"]
+    _HEX_CODECS = {
+        "UTF-8": "utf-8",
+        "Latin-1": "latin-1",
+        "GBK": "gbk",
+        "UNICODE": "utf-16",
+    }
     _DNS_TYPE_CODES = {
         "A": 1,
         "NS": 2,
@@ -3509,6 +3529,7 @@ class ToolsDialog(QDialog):
         tabs.addTab(self._build_native_tab(), "Native2String")
         tabs.addTab(self._build_base64_tab(), "Base64")
         tabs.addTab(self._build_url_tab(), "URL")
+        tabs.addTab(self._build_hex_tab(), "Hex")
         layout.addWidget(tabs)
 
     def _build_dns_tab(self) -> QWidget:
@@ -3550,9 +3571,8 @@ class ToolsDialog(QDialog):
         form_row.addWidget(self._dns_resolve_btn)
         layout.addLayout(form_row)
 
-        self._dns_output = QPlainTextEdit()
+        self._dns_output = _ScintillaTextEdit(wrap=True, persist_prefs=False)
         self._dns_output.setReadOnly(True)
-        self._dns_output.setFont(QFont("Consolas", 10))
         layout.addWidget(self._dns_output, 1)
         return page
 
@@ -3634,12 +3654,43 @@ class ToolsDialog(QDialog):
         layout.addLayout(self._codec_layout(left, right, mid, "Plain Text", "URL Encoded"), 1)
         return page
 
+    def _build_hex_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        left, right, mid = self._codec_widgets()
+        self._hex_left = left
+        self._hex_right = right
+        self._hex_encoding = QComboBox()
+        self._hex_encoding.addItems(list(self._HEX_CODECS))
+        self._hex_encoding.setToolTip("Encoding of the Plain Text side")
+        self._hex_encode_lines = QCheckBox("Lines")
+        self._hex_decode_lines = QCheckBox("Lines")
+        self._hex_decode_lines.setChecked(True)
+        encode_btn = QPushButton("Encode")
+        encode_btn.clicked.connect(self._hex_encode)
+        decode_btn = QPushButton("Decode")
+        decode_btn.clicked.connect(self._hex_decode)
+        mid.addStretch(1)
+        mid.addWidget(QLabel("Encoding"))
+        mid.addWidget(self._hex_encoding)
+        mid.addSpacing(16)
+        mid.addWidget(QLabel("Encode"))
+        mid.addWidget(self._hex_encode_lines)
+        mid.addWidget(encode_btn)
+        mid.addSpacing(16)
+        mid.addWidget(QLabel("Decode"))
+        mid.addWidget(self._hex_decode_lines)
+        mid.addWidget(decode_btn)
+        mid.addStretch(1)
+        layout.addLayout(self._codec_layout(left, right, mid, "Plain Text", "Hex"), 1)
+        return page
+
     def _codec_widgets(self):
-        left = QPlainTextEdit()
-        right = QPlainTextEdit()
+        # Raw-tab style editors, word wrap enabled by default.
+        left = _ScintillaTextEdit(wrap=True, persist_prefs=False)
+        right = _ScintillaTextEdit(wrap=True, persist_prefs=False)
         for editor in (left, right):
-            editor.setFont(QFont("Consolas", 10))
-            editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            editor.setReadOnly(False)
         mid = QVBoxLayout()
         return left, right, mid
 
@@ -3927,6 +3978,36 @@ class ToolsDialog(QDialog):
         text = self._url_right.toPlainText()
         result = "\n".join(decode_one(line) for line in text.splitlines()) if lines else decode_one(text)
         self._url_left.setPlainText(result)
+
+    def _hex_codec(self) -> str:
+        return self._HEX_CODECS.get(self._hex_encoding.currentText(), "utf-8")
+
+    def _hex_encode(self) -> None:
+        codec = self._hex_codec()
+        lines = self._hex_encode_lines.isChecked()
+        def encode_one(value: str) -> str:
+            return value.encode(codec, errors="replace").hex()
+        text = self._hex_left.toPlainText()
+        # Lines: convert each line on its own; otherwise the whole text
+        # (newlines included) becomes a single hex string.
+        result = "\n".join(encode_one(line) for line in text.splitlines()) if lines else encode_one(text)
+        self._hex_right.setPlainText(result)
+
+    def _hex_decode(self) -> None:
+        codec = self._hex_codec()
+        lines = self._hex_decode_lines.isChecked()
+        def decode_one(value: str) -> str:
+            return bytes.fromhex(value.strip()).decode(codec, errors="replace")
+        try:
+            text = self._hex_right.toPlainText()
+            if lines:
+                result = "\n".join(decode_one(line) for line in text.splitlines())
+            else:
+                # Convert line by line, then merge into one Plain Text block.
+                result = "".join(decode_one(line) for line in text.splitlines())
+            self._hex_left.setPlainText(result)
+        except ValueError as e:
+            self._hex_left.setPlainText(f"Decode failed:\n{e}")
 
 
 class MitmGuiMainWindow(QMainWindow):
