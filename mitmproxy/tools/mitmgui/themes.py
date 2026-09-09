@@ -188,6 +188,7 @@ QHeaderView::section {
     background-color: #F2F2F7;
     color: #8E8E93;
     border: none;
+    border-right: 1px solid #E5E5EA;
     border-bottom: 1px solid #E5E5EA;
     padding: 8px 6px;
     font-weight: 600;
@@ -1275,6 +1276,7 @@ QHeaderView::section {
     background-color: #3F4042;
     color: #E4E7EB;
     border: none;
+    border-right: 1px solid #4A4C4E;
     border-bottom: 1px solid #4A4C4E;
     padding: 6px 4px;
     font-weight: 600;

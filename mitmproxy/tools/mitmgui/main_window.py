@@ -3172,6 +3172,9 @@ class LogsDialog(QDialog):
             table.setAlternatingRowColors(True)
             table.setWordWrap(False)
             table.setColumnWidth(0, 190)  # time column
+            # Message: 250% of the default 100px width. The extra space is
+            # taken from the Comment column, which stretches to fill the rest.
+            table.setColumnWidth(cols.index("Message"), 250)
             table.horizontalHeader().setStretchLastSection(True)
             self._tables[category] = table
             self._tabs.addTab(table, category)
@@ -5164,20 +5167,31 @@ class MitmGuiMainWindow(QMainWindow):
         result: list[tuple[str, str]] = []
         
         for part in parts[1:]:  # Skip preamble before first boundary
-            part = part.strip()
-            if part == b"--" or part == b"":
-                continue
+            # Remove the CRLF closing the boundary line and the CRLF that
+            # precedes the next boundary. Only one trailing separator is
+            # trimmed so empty field values are preserved (a full strip()
+            # would leave the headers without a "\r\n\r\n" separator).
             if part.startswith(b"\r\n"):
                 part = part[2:]
+            elif part.startswith(b"\n"):
+                part = part[1:]
             if part.endswith(b"\r\n"):
                 part = part[:-2]
+            elif part.endswith(b"\n"):
+                part = part[:-1]
+            if part == b"--" or part == b"":
+                continue
             
-            # Split headers from body
+            # Split headers from body (tolerate LF-only line endings)
             header_end = part.find(b"\r\n\r\n")
+            sep_len = 4
+            if header_end == -1:
+                header_end = part.find(b"\n\n")
+                sep_len = 2
             if header_end == -1:
                 continue
             headers_section = part[:header_end].decode("utf-8", errors="replace")
-            part_body = part[header_end + 4:]
+            part_body = part[header_end + sep_len:]
             
             # Parse Content-Disposition
             disp_match = re.search(r'name="([^"]*)"', headers_section)
@@ -5264,7 +5278,9 @@ class MitmGuiMainWindow(QMainWindow):
             elif "x-www-form-urlencoded" in ct:
                 pairs = self._parse_urlencoded(req.content)
             elif "multipart/form-data" in ct:
-                pairs = self._parse_multipart(ct, req.content)
+                # The boundary value is case-sensitive, so the original
+                # (non-lowercased) header must be used here.
+                pairs = self._parse_multipart(req.headers.get("content-type", ""), req.content)
             else:
                 # Unknown content type, skip
                 continue
@@ -5353,7 +5369,9 @@ class MitmGuiMainWindow(QMainWindow):
             if "json" in ct:
                 pairs = self._parse_json_body(req.content)
             elif "multipart/form-data" in ct:
-                pairs = self._parse_multipart(ct, req.content)
+                # The boundary value is case-sensitive, so the original
+                # (non-lowercased) header must be used here.
+                pairs = self._parse_multipart(req.headers.get("content-type", ""), req.content)
             else:
                 continue
             
