@@ -4761,6 +4761,7 @@ class MitmGuiMainWindow(QMainWindow):
         new_flow = self._selected_flow.copy()
         new_flow.response = None
         new_flow.intercepted = False  # copy preserves intercepted but not _resume_event
+        new_flow.metadata.pop("_locked", None)  # derived session starts unlocked
         # Preserve hosts-remapping metadata so the original hostname is kept
         # during edit-and-replay (flow.copy() loses dynamic attributes).
         for attr in ("_original_host", "_hosts_remapped"):
@@ -4916,6 +4917,7 @@ class MitmGuiMainWindow(QMainWindow):
         for flow in flows:
             new_flow = flow.copy()
             new_flow.intercepted = False  # copy preserves intercepted state
+            new_flow.metadata.pop("_locked", None)  # derived session starts unlocked
             self._master.view.add([new_flow])
             self._master.replay_flow(new_flow)
 
@@ -4950,6 +4952,7 @@ class MitmGuiMainWindow(QMainWindow):
             for source_flow in flows:
                 new_flow = source_flow.copy()
                 new_flow.intercepted = False
+                new_flow.metadata.pop("_locked", None)  # derived session starts unlocked
                 new_flow.metadata["_replay_sequentially"] = True
                 self._master.view.add([new_flow])
                 self._master.replay_flow(new_flow)
