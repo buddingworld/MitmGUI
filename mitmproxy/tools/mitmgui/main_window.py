@@ -5773,10 +5773,10 @@ class MitmGuiMainWindow(QMainWindow):
         from mitmproxy.net.http import http1 as mitm_http1
         from mitmproxy import flow as mitm_flow
 
-        def _do_forward(src_flow):
-            target_host = src_flow.request.host
-            target_port = src_flow.request.port
-
+        # Create the derived flows up front so they appear in the session
+        # list immediately instead of only after the upstream proxy answers.
+        derived: list = []
+        for src_flow in flows:
             new_flow = src_flow.copy()
             new_flow.intercepted = False
             # SendTo sends a brand-new request: drop the copied response/error
@@ -5784,6 +5784,13 @@ class MitmGuiMainWindow(QMainWindow):
             # original flow's (a stale response would otherwise mask failures).
             new_flow.response = None
             new_flow.error = None
+            new_flow.metadata.pop("_locked", None)  # derived session starts unlocked
+            derived.append((src_flow, new_flow))
+            self._master.view.add([new_flow])
+
+        def _do_forward(src_flow, new_flow):
+            target_host = src_flow.request.host
+            target_port = src_flow.request.port
 
             sock = None
             try:
@@ -5931,14 +5938,17 @@ class MitmGuiMainWindow(QMainWindow):
                         content += chunk
 
                 response.content = content
+                # Mark the response as complete so the session list renders the
+                # final body size instead of the streaming "{size}..." placeholder.
+                response.timestamp_end = response.timestamp_start
 
-                # 7. Add result to view
+                # 7. Store the response and refresh the existing list entry
                 new_flow.response = response
-                self._master.view.add([new_flow])
+                self._master.view.update([new_flow])
 
             except Exception as e:
                 new_flow.error = mitm_flow.Error(str(e))
-                self._master.view.add([new_flow])
+                self._master.view.update([new_flow])
             finally:
                 if sock:
                     try:
@@ -5950,9 +5960,9 @@ class MitmGuiMainWindow(QMainWindow):
                     except Exception:
                         pass
 
-        for flow in flows:
+        for src_flow, new_flow in derived:
             t = threading.Thread(
-                target=_do_forward, args=(flow,), daemon=True
+                target=_do_forward, args=(src_flow, new_flow), daemon=True
             )
             t.start()
 
