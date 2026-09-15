@@ -1623,9 +1623,14 @@ class InspectorPanel(QWidget):
                 # Body is everything after the empty line.  QScintilla keeps the
                 # body's original line endings (CRLF stays CRLF), so encoding
                 # the text back preserves the packet's line breaks as-is.
-                if header_end > 0 and header_end + 1 < len(lines):
+                # An empty body (e.g. a pasted GET packet) must also be applied,
+                # otherwise the body of the flow this edit started from would
+                # silently survive; no blank separator line means no body at all.
+                if header_end > 0:
                     body = "\n".join(lines[header_end + 1:])
                     req.content = body.encode(self._encoding, errors="replace")
+                else:
+                    req.content = b""
 
         # ── 2. Apply WebForms tab edits only when Raw was not edited. Raw is
         # the source of truth for Edit And Replay; otherwise stale WebForms data
@@ -1688,9 +1693,13 @@ class InspectorPanel(QWidget):
         # Body is everything after the empty line.  QScintilla keeps the
         # body's original line endings (CRLF stays CRLF), so encoding the
         # text back preserves the packet's line breaks as-is.
-        if header_end > 0 and header_end + 1 < len(lines):
+        # An empty body must also be applied so it actually clears the
+        # previous one; no blank separator line means no body at all.
+        if header_end > 0:
             body = "\n".join(lines[header_end + 1:])
             resp.content = body.encode(self._encoding, errors="replace")
+        else:
+            resp.content = b""
 
         # Refresh all tabs from the updated flow
         if flow.response:
