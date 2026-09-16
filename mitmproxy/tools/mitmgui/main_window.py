@@ -4743,7 +4743,13 @@ class MitmGuiMainWindow(QMainWindow):
         urls = []
         for flow in flows:
             try:
-                urls.append(flow.request.pretty_url)
+                # For hosts-mapped flows, use the saved original host so the
+                # copied URL is not the remapped target.
+                original = getattr(flow, "_original_host", None)
+                if original:
+                    urls.append(f"{flow.request.scheme}://{original}{flow.request.path}")
+                else:
+                    urls.append(flow.request.pretty_url)
             except Exception:
                 urls.append(str(flow.request.url))
         QApplication.clipboard().setText("\n".join(urls))
@@ -5626,13 +5632,19 @@ class MitmGuiMainWindow(QMainWindow):
         for f in flows:
             if f.request:
                 scheme = f.request.scheme or "https"
-                host = f.request.host or ""
-                port = f.request.port
-                # Include port only when non-standard
-                if scheme == "http" and port != 80:
-                    host = f"{host}:{port}"
-                elif scheme == "https" and port != 443:
-                    host = f"{host}:{port}"
+                # For hosts-mapped flows, use the saved original host so the
+                # copied URL is not the remapped target.
+                original = getattr(f, "_original_host", None)
+                if original:
+                    host = original
+                else:
+                    host = f.request.host or ""
+                    port = f.request.port
+                    # Include port only when non-standard
+                    if scheme == "http" and port != 80:
+                        host = f"{host}:{port}"
+                    elif scheme == "https" and port != 443:
+                        host = f"{host}:{port}"
                 urls.append(f"{scheme}://{host}{f.request.path}")
         QApplication.clipboard().setText("\n".join(urls))
 
