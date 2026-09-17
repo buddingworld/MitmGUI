@@ -63,9 +63,15 @@ def parse(url: str | bytes) -> tuple[bytes, bytes, int, bytes]:
     if not port:
         port = 443 if parsed_b.scheme == b"https" else 80
 
-    full_path: bytes = urllib.parse.urlunsplit(
-        (b"", b"", parsed_b.path, parsed_b.query, parsed_b.fragment)  # type: ignore
-    )
+    # Rebuild path + query + fragment manually.  Using urlunsplit with an
+    # empty netloc would double any leading "//" in the path (CPython's
+    # urlunsplit prepends "//" when the path starts with "//" to keep the
+    # result unambiguous), turning http://host//x into a ////x path.
+    full_path: bytes = parsed_b.path
+    if parsed_b.query:
+        full_path += b"?" + parsed_b.query
+    if parsed_b.fragment:
+        full_path += b"#" + parsed_b.fragment
     if not full_path.startswith(b"/"):
         full_path = b"/" + full_path  # type: ignore
 

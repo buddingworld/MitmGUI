@@ -805,6 +805,14 @@ class _ScintillaTextEdit(QsciScintilla):
         return self.text()
 
     def setPlainText(self, text: str) -> None:
+        # Match the document's EOL mode to the loaded text.  QScintilla's
+        # default EOL mode is CRLF, so pressing Enter would otherwise insert
+        # "\r\n" into an LF document; the stray "\r" then breaks raw request
+        # parsing (a blank separator line becomes "\r" instead of "").
+        if "\r\n" in text:
+            self.setEolMode(QsciScintilla.EolMode.EolWindows)
+        else:
+            self.setEolMode(QsciScintilla.EolMode.EolUnix)
         self.setText(text)
 
     def document(self):
@@ -1595,20 +1603,21 @@ class InspectorPanel(QWidget):
                 except (IndexError, ValueError):
                     pass
 
-                # Parse headers until empty line
+                # Parse headers until the blank separator line, or the first
+                # line that is not a "name: value" header (that line starts
+                # the body — e.g. a body pasted right after the headers with
+                # no blank separator in between).  The "\r" tolerance handles
+                # CRLF line endings that QScintilla may keep in the document.
                 header_end = 0
                 for i in range(1, len(lines)):
-                    if lines[i] == "":
+                    line = lines[i].rstrip("\r")
+                    if line == "" or ": " not in line:
                         header_end = i
                         break
-                    try:
-                        k, v = lines[i].split(": ", 1)
-                        v = v.rstrip("\r")
-                        if i == 1:
-                            req.headers.clear()
-                        req.headers.add(k, v)
-                    except ValueError:
-                        pass
+                    k, v = line.split(": ", 1)
+                    if i == 1:
+                        req.headers.clear()
+                    req.headers.add(k, v)
 
                 # Keep authority/Host aligned with the edited Raw headers. For
                 # hosts-remapped flows, the Raw request line shows the original
@@ -1620,14 +1629,26 @@ class InspectorPanel(QWidget):
                     or hostport(req.scheme, req.host, req.port)
                 )
 
-                # Body is everything after the empty line.  QScintilla keeps the
-                # body's original line endings (CRLF stays CRLF), so encoding
-                # the text back preserves the packet's line breaks as-is.
-                # An empty body (e.g. a pasted GET packet) must also be applied,
-                # otherwise the body of the flow this edit started from would
-                # silently survive; no blank separator line means no body at all.
+                # Body is everything after the header block.  The line that
+                # ended the headers is either the blank separator (the body
+                # starts on the next line) or the first body line itself (no
+                # blank separator was present).  QScintilla keeps the body's
+                # original line endings (CRLF stays CRLF), so encoding the
+                # text back preserves the packet's line breaks as-is.
+                # An empty body (e.g. a pasted GET packet) must also be
+                # applied, otherwise the body of the flow this edit started
+                # from would silently survive; no separator means no body.
                 if header_end > 0:
-                    body = "\n".join(lines[header_end + 1:])
+                    if lines[header_end].rstrip("\r") == "":
+                        body = "\n".join(lines[header_end + 1:])
+                    else:
+                        body = "\n".join(lines[header_end:])
+                        # A blank line that used to follow the (empty) header
+                        # block may now trail the inserted body — drop that
+                        # single stale line so the sent body matches exactly
+                        # what was pasted.
+                        if body.endswith("\n"):
+                            body = body[:-1]
                     req.content = body.encode(self._encoding, errors="replace")
                 else:
                     req.content = b""
