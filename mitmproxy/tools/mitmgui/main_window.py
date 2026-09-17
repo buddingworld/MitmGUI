@@ -4524,6 +4524,19 @@ class MitmGuiMainWindow(QMainWindow):
         lock_act.triggered.connect(self._toggle_lock_selected)
         self._session_table.addAction(lock_act)
 
+        # Home/End: jump to the first/last session in the list
+        home_act = QAction("JumpFirstSession", self._session_table)
+        home_act.setShortcut(QKeySequence(Qt.Key.Key_Home))
+        home_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        home_act.triggered.connect(self._jump_session_home)
+        self._session_table.addAction(home_act)
+
+        end_act = QAction("JumpLastSession", self._session_table)
+        end_act.setShortcut(QKeySequence(Qt.Key.Key_End))
+        end_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        end_act.triggered.connect(self._jump_session_end)
+        self._session_table.addAction(end_act)
+
         # Right-click context menu
         self._session_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._session_table.customContextMenuRequested.connect(self._on_context_menu)
@@ -4742,16 +4755,9 @@ class MitmGuiMainWindow(QMainWindow):
             return
         urls = []
         for flow in flows:
-            try:
-                # For hosts-mapped flows, use the saved original host so the
-                # copied URL is not the remapped target.
-                original = getattr(flow, "_original_host", None)
-                if original:
-                    urls.append(f"{flow.request.scheme}://{original}{flow.request.path}")
-                else:
-                    urls.append(flow.request.pretty_url)
-            except Exception:
-                urls.append(str(flow.request.url))
+            url = self._flow_copy_url(flow)
+            if url:
+                urls.append(url)
         QApplication.clipboard().setText("\n".join(urls))
 
     def _toggle_auto_roll(self) -> None:
@@ -4768,6 +4774,21 @@ class MitmGuiMainWindow(QMainWindow):
         proxy_idx = self._sort_proxy.mapFromSource(self._session_model.index(row, 0))
         self._session_table.selectRow(proxy_idx.row())
         self._session_table.scrollTo(proxy_idx)
+
+    def _jump_session_row(self, row: int) -> None:
+        """Select the session at the given (view-sorted) row, scrolling to it."""
+        if 0 <= row < self._sort_proxy.rowCount():
+            idx = self._sort_proxy.index(row, 0)
+            self._session_table.selectRow(row)
+            self._session_table.scrollTo(idx)
+
+    def _jump_session_home(self) -> None:
+        """Home: select the first session in the list."""
+        self._jump_session_row(0)
+
+    def _jump_session_end(self) -> None:
+        """End: select the last session in the list."""
+        self._jump_session_row(self._sort_proxy.rowCount() - 1)
 
     def _compose_request(self) -> None:
         """Clone selected flow, add to session list, and enter edit mode."""
@@ -5624,28 +5645,34 @@ class MitmGuiMainWindow(QMainWindow):
 
         menu.exec(self._session_table.viewport().mapToGlobal(pos))
 
+    @staticmethod
+    def _flow_copy_url(f) -> str:
+        """Unified URL used by all copy actions.
+
+        For hosts-mapped flows prefer the saved original host; otherwise fall
+        back to pretty_url, which prefers the Host header over the (possibly
+        hosts-remapped) connection target. request.host is never used.
+        """
+        request = getattr(f, "request", None)
+        if not request:
+            return ""
+        original = getattr(f, "_original_host", None)
+        if original:
+            return f"{request.scheme or 'https'}://{original}{request.path}"
+        try:
+            return request.pretty_url
+        except Exception:
+            return str(request.url)
+
     def _copy_just_url(self) -> None:
         flows = self._get_selected_flows()
         if not flows:
             return
         urls = []
         for f in flows:
-            if f.request:
-                scheme = f.request.scheme or "https"
-                # For hosts-mapped flows, use the saved original host so the
-                # copied URL is not the remapped target.
-                original = getattr(f, "_original_host", None)
-                if original:
-                    host = original
-                else:
-                    host = f.request.host or ""
-                    port = f.request.port
-                    # Include port only when non-standard
-                    if scheme == "http" and port != 80:
-                        host = f"{host}:{port}"
-                    elif scheme == "https" and port != 443:
-                        host = f"{host}:{port}"
-                urls.append(f"{scheme}://{host}{f.request.path}")
+            url = self._flow_copy_url(f)
+            if url:
+                urls.append(url)
         QApplication.clipboard().setText("\n".join(urls))
 
     def _copy_session(self) -> None:
@@ -6097,8 +6124,25 @@ class MitmGuiMainWindow(QMainWindow):
                     try:
                         state = tnet_loads(raw)
                         f = flow_mod.Flow.from_state(state)
+                        # The transient _original_host attribute (hosts
+                        # remapping) is not serialised in the flow state.
+                        # When the saved Host header disagrees with the saved
+                        # connection target, the flow was hosts-remapped:
+                        # restore the attribute so Raw view / copy show the
+                        # original, pre-remap URL.
+                        req = getattr(f, "request", None)
+                        if (
+                            req is not None
+                            and req.host
+                            and req.host_header
+                            and req.pretty_host != req.host
+                        ):
+                            f._original_host = req.host_header or req.pretty_host
+                            f._hosts_remapped = True
+                        # view.add triggers sig_view_add -> _on_flow_added,
+                        # which adds the flow to the session model. Don't add
+                        # it manually here or it would appear twice.
                         self._master.view.add([f])
-                        self._session_model.add_flow(f)
                     except Exception as e:
                         print(f"[Load] Skipping {name}: {e}", file=sys.stderr)
         except zipfile.BadZipFile:
