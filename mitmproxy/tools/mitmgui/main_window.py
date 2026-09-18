@@ -1,5 +1,4 @@
 import base64
-import binascii
 import ctypes
 import fnmatch
 import json as json_mod
@@ -731,6 +730,9 @@ class _ScintillaTextEdit(QsciScintilla):
     ):
         super().__init__()
         self._inspector = inspector_panel
+        # Optional callback(menu) letting a host view (e.g. the Base64 tool's
+        # Plain Text editor) add its own Encoding submenu to the context menu.
+        self._encoding_menu_hook = None
         self._persist_prefs = persist_prefs
         self.setReadOnly(True)
         self.setUtf8(True)
@@ -852,6 +854,8 @@ class _ScintillaTextEdit(QsciScintilla):
         menu = self.createStandardContextMenu()
         if self._inspector is not None:
             self._inspector.add_encoding_menu(menu)
+        if self._encoding_menu_hook is not None:
+            self._encoding_menu_hook(menu)
         menu.addSeparator()
         wrap_action = menu.addAction("Word Wrap")
         wrap_action.setCheckable(True)
@@ -3636,6 +3640,11 @@ class ToolsDialog(QDialog):
         left, right, mid = self._codec_widgets()
         self._base64_left = left
         self._base64_right = right
+        # Text encoding shared by both Base64 directions.  latin-1 maps every
+        # byte 1:1, so decode -> encode is always reversible even for binary
+        # data; utf-8/gbk keep the lenient replace-based flow for text.
+        self._base64_text_encoding = "latin-1"
+        left._encoding_menu_hook = self._add_base64_encoding_menu
         self._base64_encode_padding = QCheckBox("Padding")
         self._base64_encode_padding.setChecked(True)
         self._base64_encode_lines = QCheckBox("Lines")
@@ -3968,11 +3977,25 @@ class ToolsDialog(QDialog):
                 converted.append(f"\\U{code:08x}")
         self._native_right.setPlainText("".join(converted))
 
+    def _add_base64_encoding_menu(self, menu: QMenu) -> None:
+        """Encoding submenu (same UX as the Raw tab) for the Base64 tool's
+        Plain Text editor."""
+        encoding_menu = menu.addMenu("Encoding")
+        for enc in ENCODINGS:
+            action = encoding_menu.addAction(enc)
+            action.setCheckable(True)
+            action.setChecked(enc == self._base64_text_encoding)
+            action.triggered.connect(lambda checked, e=enc: self._set_base64_encoding(e))
+
+    def _set_base64_encoding(self, encoding: str) -> None:
+        self._base64_text_encoding = encoding
+
     def _base64_encode(self) -> None:
         padding = self._base64_encode_padding.isChecked()
         lines = self._base64_encode_lines.isChecked()
+        encoding = self._base64_text_encoding
         def encode_one(value: str) -> str:
-            encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+            encoded = base64.b64encode(value.encode(encoding, errors="replace")).decode("ascii")
             return encoded if padding else encoded.rstrip("=")
         text = self._base64_left.toPlainText()
         result = "\n".join(encode_one(line) for line in text.splitlines()) if lines else encode_one(text)
@@ -3981,16 +4004,17 @@ class ToolsDialog(QDialog):
     def _base64_decode(self) -> None:
         strict = self._base64_decode_strict.isChecked()
         lines = self._base64_decode_lines.isChecked()
+        encoding = self._base64_text_encoding
         def decode_one(value: str) -> str:
             raw = value.strip()
             if not strict:
                 raw += "=" * (-len(raw) % 4)
-            return base64.b64decode(raw, validate=strict).decode("utf-8", errors="replace")
+            return base64.b64decode(raw, validate=strict).decode(encoding, errors="replace")
         try:
             text = self._base64_right.toPlainText()
             result = "\n".join(decode_one(line) for line in text.splitlines()) if lines else decode_one(text)
             self._base64_left.setPlainText(result)
-        except (binascii.Error, UnicodeDecodeError) as e:
+        except ValueError as e:
             self._base64_left.setPlainText(f"Decode failed:\n{e}")
 
     def _url_encode(self) -> None:
@@ -5857,11 +5881,116 @@ class MitmGuiMainWindow(QMainWindow):
             derived.append((src_flow, new_flow))
             self._master.view.add([new_flow])
 
+        def _parse_response_head(lines: list[bytes]):
+            """Parse a raw response head, tolerating malformed header lines.
+
+            mitmproxy's parser rejects malformed heads outright; by this point
+            the request has already reached the proxy, so failing the whole
+            forward would show a bogus "Err" for a request that actually
+            succeeded. Sanitize the head instead and only give up if even the
+            status line is unusable.
+            """
+            clean = [lines[0]] if lines else [b""]
+            for line in lines[1:]:
+                if not line:
+                    continue
+                if line[0] in b" \t":  # obsolete line folding
+                    if len(clean) > 1:
+                        clean[-1] += b" " + line.strip()
+                    continue
+                if b":" not in line:
+                    continue  # drop malformed header lines instead of failing
+                clean.append(line)
+            try:
+                return mitm_http1.read_response_head(clean)
+            except ValueError as e:
+                raise ConnectionError(
+                    f"Bad HTTP response from proxy: {lines[0][:120]!r} ({e})"
+                )
+
+        def _is_bodyless(request, response) -> bool:
+            """RFC 7230 §3.3.3 cases where a response cannot carry a body."""
+            return (
+                request.method.upper() == "HEAD"
+                or 100 <= response.status_code <= 199
+                or response.status_code in (204, 304)
+            )
+
+        def _body_size(request, response) -> int | None:
+            """Body framing rules of RFC 7230 §3.3, but lenient.
+
+            mitmproxy's own ``expected_http_body_size`` raises on an invalid or
+            repeated ``content-length``/``transfer-encoding``; here we fall back
+            to reading until the server closes the connection instead of turning
+            an otherwise successful forward into an error.
+            """
+            if _is_bodyless(request, response):
+                return 0
+            te = response.headers.get("transfer-encoding", "")
+            if te:
+                codings = [c.strip().lower() for c in te.split(",") if c.strip()]
+                return None if codings and codings[-1] == "chunked" else -1
+            cl = response.headers.get("content-length", "")
+            values = [v.strip() for v in cl.split(",") if v.strip()]
+            if values and all(v == values[0] for v in values) and values[0].isdigit():
+                return int(values[0])
+            return -1
+
+        def _read_chunked(sock, buf: bytes) -> bytes:
+            """Decode a chunked body, returning whatever was received if the
+            connection ends early."""
+            body = bytearray()
+            while True:
+                while b"\r\n" not in buf:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        return bytes(body)
+                    buf += chunk
+                line, _, buf = buf.partition(b"\r\n")
+                try:
+                    size = int(line.split(b";", 1)[0].strip() or b"0", 16)
+                except ValueError:
+                    return bytes(body)
+                if size == 0:  # last chunk; trailers are not needed here
+                    return bytes(body)
+                while len(buf) < size + 2:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        return bytes(body) + buf
+                    buf += chunk
+                body += buf[:size]
+                buf = buf[size + 2 :]
+
+        def _read_body(sock, buf: bytes, request, response) -> bytes:
+            size = _body_size(request, response)
+            if size is None:
+                return _read_chunked(sock, buf)
+            if size < 0:
+                # No framing information: read until the server closes the
+                # connection. A read timeout keeps the partial body rather than
+                # reporting an error for a response that did arrive.
+                while True:
+                    try:
+                        chunk = sock.recv(65536)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+                return buf
+            while len(buf) < size:
+                chunk = sock.recv(min(65536, size - len(buf)))
+                if not chunk:
+                    break
+                buf += chunk
+            return buf[:size]
+
         def _do_forward(src_flow, new_flow):
             target_host = src_flow.request.host
             target_port = src_flow.request.port
 
             sock = None
+            stage = "connect to proxy"
             try:
                 # 1. Connect to upstream proxy
                 sock = socket.create_connection(
@@ -5869,6 +5998,7 @@ class MitmGuiMainWindow(QMainWindow):
                 )
 
                 # 2. Send CONNECT to establish tunnel
+                stage = "proxy CONNECT"
                 authority = f"{target_host}:{target_port}"
                 connect_req = (
                     f"CONNECT {authority} HTTP/1.1\r\n"
@@ -5909,6 +6039,7 @@ class MitmGuiMainWindow(QMainWindow):
 
                 is_https = src_flow.request.scheme == "https"
                 if is_https:
+                    stage = "TLS handshake"
                     ctx = ssl.create_default_context()
                     ctx.check_hostname = False
                     ctx.verify_mode = ssl.CERT_NONE
@@ -5918,6 +6049,10 @@ class MitmGuiMainWindow(QMainWindow):
 
                 # 4. Assemble request in origin-form
                 request = src_flow.request
+                # Send the raw (still content-encoded) body: the original
+                # content-encoding header is kept below, so passing the
+                # decompressed variant would send a body that no longer matches it.
+                req_body = request.raw_content or b""
                 req_line = (
                     request.data.method
                     + b" "
@@ -5941,82 +6076,65 @@ class MitmGuiMainWindow(QMainWindow):
                     del req_headers["Cookie"]
                     req_headers["Cookie"] = "; ".join(cookie_vals)
 
-                # Replace transfer-encoding with content-length (we send raw body).
+                # Replace transfer-encoding with content-length (we send the body raw).
                 if "transfer-encoding" in req_headers:
                     del req_headers["transfer-encoding"]
-                    if request.content:
-                        req_headers["content-length"] = str(
-                            len(request.content)
-                        )
+                if req_body:
+                    req_headers["content-length"] = str(len(req_body))
                 headers_bytes = bytes(req_headers)
 
-                raw_request = req_line + headers_bytes + b"\r\n"
-                if request.content:
-                    raw_request += request.content
+                raw_request = req_line + headers_bytes + b"\r\n" + req_body
 
+                stage = "send request"
                 sock.sendall(raw_request)
 
-                # 5. Read response headers
-                response_data = b""
-                while b"\r\n\r\n" not in response_data:
-                    chunk = sock.recv(8192)
-                    if not chunk:
-                        break
-                    response_data += chunk
-
-                header_end = response_data.find(b"\r\n\r\n")
-                if header_end == -1:
-                    raise ConnectionError("No response headers received")
-
-                resp_header_lines = (
-                    response_data[:header_end].split(b"\r\n")
-                )
-                try:
-                    response = mitm_http1.read_response_head(
-                        resp_header_lines
+                # 5. Read the response head, skipping 1xx informational responses
+                stage = "read response"
+                buf = b""
+                while True:
+                    while b"\r\n\r\n" not in buf:
+                        chunk = sock.recv(65536)
+                        if not chunk:
+                            break
+                        buf += chunk
+                    header_end = buf.find(b"\r\n\r\n")
+                    if header_end == -1:
+                        raise ConnectionError(
+                            f"No response headers received "
+                            f"({len(buf)} bytes: {buf[:120]!r})"
+                        )
+                    response = _parse_response_head(
+                        buf[:header_end].split(b"\r\n")
                     )
-                except ValueError:
-                    raise ConnectionError("Invalid HTTP response")
+                    buf = buf[header_end + 4 :]
+                    if not 100 <= response.status_code <= 199:
+                        break
 
-                # 6. Read response body
-                content = response_data[header_end + 4 :]
-                expected_size = mitm_http1.expected_http_body_size(
-                    request, response
-                )
-                if expected_size is None:
-                    # Chunked — read until terminating chunk
-                    while b"0\r\n\r\n" not in content:
-                        chunk = sock.recv(8192)
-                        if not chunk:
-                            break
-                        content += chunk
-                elif expected_size > 0:
-                    remaining = expected_size - len(content)
-                    while remaining > 0:
-                        chunk = sock.recv(min(8192, remaining))
-                        if not chunk:
-                            break
-                        content += chunk
-                        remaining = expected_size - len(content)
-                elif expected_size == -1:
-                    # Read until connection close
-                    while True:
-                        chunk = sock.recv(8192)
-                        if not chunk:
-                            break
-                        content += chunk
+                # 6. Read the response body
+                body = _read_body(sock, buf, request, response)
 
-                response.content = content
+                # 7. Store the response. Keep the body exactly as received
+                # (still content-encoded): mitmproxy exposes the decoded variant
+                # through Response.content, so re-encoding it here would corrupt
+                # the stored body and the reported size.
+                if not _is_bodyless(request, response):
+                    if "transfer-encoding" in response.headers:
+                        del response.headers["transfer-encoding"]
+                    if "trailer" in response.headers:
+                        del response.headers["trailer"]
+                    response.headers["content-length"] = str(len(body))
+                response.raw_content = body
                 # Mark the response as complete so the session list renders the
                 # final body size instead of the streaming "{size}..." placeholder.
                 response.timestamp_end = response.timestamp_start
 
-                # 7. Store the response and refresh the existing list entry
+                # 8. Store the response and refresh the existing list entry
+                stage = "update session"
                 new_flow.response = response
                 self._master.view.update([new_flow])
 
             except Exception as e:
-                new_flow.error = mitm_flow.Error(str(e))
+                new_flow.error = mitm_flow.Error(f"{stage}: {e}")
                 self._master.view.update([new_flow])
             finally:
                 if sock:
