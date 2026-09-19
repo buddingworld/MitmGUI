@@ -61,6 +61,8 @@ from PyQt6.QtWidgets import (
     QTableView,
     QToolBar,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -97,7 +99,7 @@ def _make_icon(icon_type: str, bg_color: str, size: int = 64) -> QIcon:
     """Generate a minimalist shape icon on a colored background.
 
     icon_type: proxy, detail, filter, breakpoint, code, hosts, replace, options,
-               new_session, plugins, logs, websocket
+               new_session, plugins, logs, websocket, help
     """
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -269,6 +271,12 @@ def _make_icon(icon_type: str, bg_color: str, size: int = 64) -> QIcon:
         p.drawLine(24, 26, 40, 26)
         p.drawLine(24, 38, 40, 38)
 
+    elif icon_type == "help":
+        # Question mark
+        p.setPen(QColor("white"))
+        f = QFont("Segoe UI", int(size * 0.55), QFont.Weight.Bold)
+        p.setFont(f)
+        p.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "?")
     else:
         # Fallback: plain letter
         p.setPen(QColor("white"))
@@ -2299,6 +2307,88 @@ class _TextEditDialog(QDialog):
         dlg.show()
 
 
+class ShortcutKeysDialog(QDialog):
+    """Read-only list of keyboard shortcuts, grouped by scope."""
+
+    SECTIONS = (
+        (
+            "Global",
+            (
+                ("R", "Replay the selected session(s)"),
+                ("Shift+R", "Replay the selected session(s) sequentially"),
+                ("E", "Compose a new request"),
+                ("F2", "Toggle edit mode for the selected session"),
+                ("F11", "Toggle Breakpoint mode (intercept all requests)"),
+                ("Shift+F11", "Open the Breakpoint Rules dialog"),
+                ("F12", "Toggle the system proxy (same as Capture)"),
+                ("Ctrl+F", "Find sessions"),
+                ("Ctrl+U", "Copy the selected session URLs"),
+                ("Ctrl+R", "Open Edit - Custom Rules (rules.py)"),
+                ("Ctrl+E", "Toggle auto-roll (auto-scroll on new sessions)"),
+                ("Ctrl+X", "Clear the session list"),
+                ("Ctrl+Q", "Exit mitmgui"),
+                ("Ctrl+0", "Reset the highlight color of the selected session(s)"),
+                (
+                    "Ctrl+1 .. Ctrl+9",
+                    "Highlight the selected session(s) (red / green / blue shades)",
+                ),
+            ),
+        ),
+        (
+            "Session List",
+            (
+                ("Delete", "Remove the selected session(s)"),
+                ("Ctrl+L", "Lock / unlock the selected session(s)"),
+                ("Home", "Jump to the first session"),
+                ("End", "Jump to the last session"),
+            ),
+        ),
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Shortcut Keys")
+        self.setWindowIcon(_make_icon("help", "#1565C0"))
+        self.setMinimumSize(420, 420)
+        self.resize(480, 560)
+
+        layout = QVBoxLayout(self)
+
+        tree = QTreeWidget()
+        tree.setColumnCount(2)
+        tree.setHeaderLabels(["Shortcut", "Description"])
+        tree.setRootIsDecorated(True)
+        tree.setAlternatingRowColors(True)
+        tree.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        bold = QFont()
+        bold.setBold(True)
+        for section, entries in self.SECTIONS:
+            group = QTreeWidgetItem(tree, [f"{section} ({len(entries)})", ""])
+            group.setFont(0, bold)
+            group.setFirstColumnSpanned(True)
+            for key, desc in entries:
+                item = QTreeWidgetItem(group, [key, desc])
+                item.setToolTip(0, key)
+                item.setToolTip(1, desc)
+        tree.expandAll()
+
+        layout.addWidget(tree)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+        tree.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        tree.header().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+
+
 class _ResponseTextEdit(QPlainTextEdit):
     """Multiline editor that opens a dedicated edit dialog on double-click."""
 
@@ -4302,6 +4392,7 @@ class MitmGuiMainWindow(QMainWindow):
         edit_menu.addAction(rules_action)
 
         view_menu = menubar.addMenu("&View")
+        self._view_menu = view_menu
         capture_action = QAction("&Capture Traffic", self)
         capture_action.setCheckable(True)
         capture_action.setChecked(True)
@@ -4320,6 +4411,10 @@ class MitmGuiMainWindow(QMainWindow):
         tools_menu.addAction(self._options_action)
 
         help_menu = menubar.addMenu("&Help")
+        shortcuts_action = QAction("&Shortcut Keys", self)
+        shortcuts_action.triggered.connect(self._show_shortcut_keys)
+        help_menu.addAction(shortcuts_action)
+        help_menu.addSeparator()
         about_action = QAction("&About mitmgui", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
@@ -4419,6 +4514,12 @@ class MitmGuiMainWindow(QMainWindow):
     def _show_about(self) -> None:
         QMessageBox.about(self, "About mitmgui", "MITMGUI Ver 1.0.0")
 
+    def _show_shortcut_keys(self) -> None:
+        """Open the keyboard shortcut reference (non-blocking)."""
+        dlg = ShortcutKeysDialog(self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
+
     def _on_theme_selected(self) -> None:
         """Apply the selected theme via QSS and persist the choice."""
         act = self.sender()
@@ -4435,10 +4536,24 @@ class MitmGuiMainWindow(QMainWindow):
 
     # ── Toolbar ──
 
+    def createPopupMenu(self):  # type: ignore[override]
+        """Suppress Qt's default main-window context menu.
+
+        It only contained the checkable "Main Toolbar" entry, which now lives
+        in View → Main Toolbar instead."""
+        return None
+
     def _setup_toolbar(self) -> None:
         toolbar = QToolBar("Main Toolbar")
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
+        self._toolbar = toolbar
+
+        # Toolbar visibility toggle moved here from the toolbar's right-click menu.
+        toggle_action = toolbar.toggleViewAction()
+        toggle_action.setText("&Main Toolbar")
+        self._view_menu.addSeparator()
+        self._view_menu.addAction(toggle_action)
 
         self._replay_action = toolbar.addAction("Replay")
         self._replay_action.setToolTip("Replay selected request (R)")
@@ -4466,6 +4581,12 @@ class MitmGuiMainWindow(QMainWindow):
         self._filter_action = toolbar.addAction("\U0001f50d Filter")
         self._filter_action.setToolTip("Edit filter rules")
         self._filter_action.triggered.connect(self._open_filter_dialog)
+        filter_btn = toolbar.widgetForAction(self._filter_action)
+        if filter_btn:
+            filter_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            filter_btn.customContextMenuRequested.connect(
+                self._show_filter_context_menu
+            )
 
         self._find_action = toolbar.addAction("\U0001f52d Find")
         self._find_action.setToolTip("Find sessions (Ctrl+F)")
@@ -6427,6 +6548,66 @@ class MitmGuiMainWindow(QMainWindow):
     def _filters_applied(self, dlg) -> None:
         self._save_filters(dlg.rules)
         self._apply_filters()
+
+    # ── QuickFilter ──
+
+    # Content types treated as static resources by QuickFilter.
+    _STATIC_CONTENT_TYPES = frozenset(
+        {
+            "text/css",
+            "text/html",
+            "application/xhtml+xml",
+            "application/javascript",
+            "text/javascript",
+            "application/x-javascript",
+        }
+    )
+    _STATIC_CONTENT_PREFIXES = ("image/", "video/")
+
+    def _show_filter_context_menu(self, pos) -> None:
+        """Right-click menu for the toolbar Filter button."""
+        btn = self.sender()
+        if btn is None:
+            return
+        menu = QMenu(self)
+        act = menu.addAction("QuickFilter(Static Resource)")
+        act.triggered.connect(self._quick_filter_static_resources)
+        menu.exec(btn.mapToGlobal(pos))
+
+    @classmethod
+    def _is_static_resource(cls, flow) -> bool:
+        """True if the flow's response Content-Type is a static resource."""
+        resp = getattr(flow, "response", None)
+        if resp is None:
+            return False
+        ct = (resp.headers.get("content-type", "") or "").split(";", 1)[0]
+        ct = ct.strip().lower()
+        if not ct:
+            return False
+        if ct in cls._STATIC_CONTENT_TYPES:
+            return True
+        return ct.startswith(cls._STATIC_CONTENT_PREFIXES)
+
+    def _quick_filter_static_resources(self) -> None:
+        """Remove listed sessions whose response is a static resource."""
+        to_remove = [
+            (i, f)
+            for i, f in enumerate(self._session_model._flows)
+            if not self._is_flow_locked(f) and self._is_static_resource(f)
+        ]
+        if not to_remove:
+            return
+        model = self._session_model
+        model.beginResetModel()
+        for row, f in reversed(to_remove):
+            fid = getattr(f, "id", None)
+            model._flow_colors.pop(fid, None)
+            model._flow_fg_colors.pop(fid, None)
+            model._flows.pop(row)
+        model.endResetModel()
+        removed = {id(f) for _, f in to_remove}
+        if self._selected_flow is not None and id(self._selected_flow) in removed:
+            self._selected_flow = None
 
     def _open_auto_rules_dialog(self) -> None:
         """Open the Auto Rules dialog."""
