@@ -4,7 +4,6 @@ pyopenssl
 brotli
 zstandard
 wsproto
-ruamel
 ruamel.yaml
 aioquic
 kaitaistruct
