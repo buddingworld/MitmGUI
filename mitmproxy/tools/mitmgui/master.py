@@ -163,6 +163,9 @@ class _AutoRulesAddon:
       ``WebSocket.*`` targets rewrite the content of WebSocket messages
       (C2S = client -> server, S2C = server -> client, Both = either
       direction). They are applied in the ``websocket_message`` hook.
+      For ``Request.Headers`` / ``Response.Headers`` the ``source`` is matched
+      against the whole ``name: value`` header line, e.g. replacing
+      ``cookie: 123`` with ``cookie1: 234``.
     """
 
     AUTO_FILE = os.path.join(os.getcwd(), "autos.json")
@@ -284,14 +287,22 @@ class _AutoRulesAddon:
 
     @staticmethod
     def _apply_replace_to_headers(headers, source: str, destination: str, rtype: str) -> bool:
-        """Apply replacement to header names and values. Returns True if any change."""
+        """Apply replacement to whole ``name: value`` header lines.
+
+        Returns True if any change. The ``source`` is matched against the full
+        header line, so a rule can rewrite the pair itself (``cookie: 123`` ->
+        ``cookie1: 234``).
+        """
         changed = False
         new_fields = []
         for name, value in headers.fields:
             s_name = name.decode("utf-8", "replace")
             s_value = value.decode("utf-8", "replace")
-            new_name = _AutoRulesAddon._apply_replace_text(s_name, source, destination, rtype)
-            new_value = _AutoRulesAddon._apply_replace_text(s_value, source, destination, rtype)
+            line = f"{s_name}: {s_value}"
+            new_line = _AutoRulesAddon._apply_replace_text(line, source, destination, rtype)
+            new_name, _, new_value = new_line.partition(":")
+            if new_value.startswith(" "):
+                new_value = new_value[1:]
             if new_name != s_name or new_value != s_value:
                 changed = True
             new_fields.append((new_name.encode("utf-8"), new_value.encode("utf-8")))

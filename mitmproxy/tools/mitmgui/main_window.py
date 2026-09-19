@@ -74,6 +74,7 @@ from mitmproxy.tools.mitmgui import themes
 from mitmproxy.tools.mitmgui.config import AppConfig
 from mitmproxy.tools.mitmgui.master import MitmGuiMaster
 from mitmproxy.tools.mitmgui.session_list import SessionTableModel
+from mitmproxy.tools.mitmgui.websocket_window import WebSocketWindow
 
 ENCODINGS = ["utf-8", "gbk", "latin-1"]
 DEFAULT_ENCODING = "utf-8"
@@ -95,7 +96,8 @@ def _glob_match(value: str, pattern: str, case_sensitive: bool) -> bool:
 def _make_icon(icon_type: str, bg_color: str, size: int = 64) -> QIcon:
     """Generate a minimalist shape icon on a colored background.
 
-    icon_type: proxy, detail, filter, breakpoint, code, hosts, replace, options
+    icon_type: proxy, detail, filter, breakpoint, code, hosts, replace, options,
+               new_session, plugins, logs, websocket
     """
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -259,6 +261,13 @@ def _make_icon(icon_type: str, bg_color: str, size: int = 64) -> QIcon:
         p.drawLine(22, 20, 42, 20)
         p.drawLine(22, 28, 42, 28)
         p.drawLine(22, 36, 42, 36)
+
+    elif icon_type == "websocket":
+        # Plug and socket facing each other, connected by two pins
+        p.drawRoundedRect(8, 18, 16, 28, 4, 4)
+        p.drawRoundedRect(40, 18, 16, 28, 4, 4)
+        p.drawLine(24, 26, 40, 26)
+        p.drawLine(24, 38, 40, 38)
 
     else:
         # Fallback: plain letter
@@ -4089,6 +4098,7 @@ class MitmGuiMainWindow(QMainWindow):
         self._logs_dialog: "LogsDialog | None" = None  # single instance Logs window
         self._plugins_dialog: "PluginsDialog | None" = None  # single instance
         self._tools_dialog: "ToolsDialog | None" = None  # single instance
+        self._websocket_window: "WebSocketWindow | None" = None  # single instance
 
         # Plugins run on the proxy thread; bridge their Logs/New Session calls
         # back to the GUI thread.
@@ -4301,6 +4311,9 @@ class MitmGuiMainWindow(QMainWindow):
         hosts_action = QAction("&Hosts", self)
         hosts_action.triggered.connect(self._open_hosts_remapping)
         tools_menu.addAction(hosts_action)
+        websocket_action = QAction("&WebSocket", self)
+        websocket_action.triggered.connect(self._open_websocket_window)
+        tools_menu.addAction(websocket_action)
         tools_menu.addSeparator()
         self._options_action = QAction("&Options...", self)
         self._options_action.triggered.connect(self._open_options)
@@ -6903,6 +6916,20 @@ class MitmGuiMainWindow(QMainWindow):
         dlg = HostsRemappingDialog(self._master, self)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.show()
+
+    def _open_websocket_window(self) -> None:
+        """Open the (single instance) WebSocket session list window."""
+        if self._websocket_window is None:
+            self._websocket_window = WebSocketWindow(self._master, self)
+            self._websocket_window.setAttribute(
+                Qt.WidgetAttribute.WA_DeleteOnClose
+            )
+            self._websocket_window.destroyed.connect(
+                lambda: setattr(self, "_websocket_window", None)
+            )
+        self._websocket_window.show()
+        self._websocket_window.raise_()
+        self._websocket_window.activateWindow()
 
     # ── Frameless window management ──
 
