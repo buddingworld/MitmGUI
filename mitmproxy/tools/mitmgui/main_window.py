@@ -2417,6 +2417,7 @@ class AutoRuleDialog(QDialog):
     ITEMS = [
         "Request.Url",
         "Request.Header",
+        "Request.Body",
         "Response.Header",
         "Response.Body",
     ]
@@ -7007,6 +7008,11 @@ class MitmGuiMainWindow(QMainWindow):
             if not flow.request:
                 return ""
             return str(flow.request.headers)
+        if item == "Request.Body":
+            if not flow.request:
+                return ""
+            content = flow.request.get_text(strict=False)
+            return content or ""
         if item == "Response.Header":
             if not flow.response:
                 return ""

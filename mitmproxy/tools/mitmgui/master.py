@@ -130,7 +130,7 @@ class _AutoRulesAddon:
     Rule format:
         {
           "enabled": true,
-          "item": "Request.Url" | "Request.Header"
+          "item": "Request.Url" | "Request.Header" | "Request.Body"
                   | "Response.Header" | "Response.Body",   # match location
           "match_type": "String" | "Regex",
           "match_value": "...",                            # match condition
@@ -222,6 +222,11 @@ class _AutoRulesAddon:
                 return str(flow.request.headers)
             except Exception:
                 return ""
+        if item == "Request.Body":
+            if not flow.request:
+                return ""
+            content = flow.request.get_text(strict=False)
+            return content or ""
         if item == "Response.Header":
             if not flow.response:
                 return ""
@@ -438,8 +443,8 @@ class _AutoRulesAddon:
         server.
 
         Only rules whose match location lives on the request side
-        (Request.Url / Request.Header) can be evaluated here, since the
-        response is not available yet.
+        (Request.Url / Request.Header / Request.Body) can be evaluated here,
+        since the response is not available yet.
         """
         for rule in self._rules:
             if not rule.get("enabled", True):
@@ -631,7 +636,11 @@ class _AutoRulesAddon:
                 continue
             if rule.get("action") != "SaveToFile":
                 continue
-            if rule.get("item") not in ("Request.Url", "Request.Header"):
+            if rule.get("item") not in (
+                "Request.Url",
+                "Request.Header",
+                "Request.Body",
+            ):
                 continue
             text = self._target_text(flow, rule.get("item", ""))
             if self._match_rule(rule, text):
