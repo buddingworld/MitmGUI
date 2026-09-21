@@ -29,12 +29,15 @@ from PyQt6.QtWidgets import (
 )
 
 from mitmproxy.tools.mitmgui.config import AppConfig
+from mitmproxy.tools.mitmgui.mcp_server import MCP_URL
 
 
 class OptionsDialog(QDialog):
     """Configuration dialog with Https / Connections / Gateway tabs."""
 
     session_list_font_size_changed = pyqtSignal(int)
+    mcp_enabled_changed = pyqtSignal(bool)
+    mcp_status_requested = pyqtSignal()
 
     def __init__(self, config: AppConfig, parent=None):
         super().__init__(parent)
@@ -144,6 +147,27 @@ class OptionsDialog(QDialog):
         font_row.addWidget(self._session_font_slider, 1)
         font_row.addWidget(self._session_font_spin)
         layout.addLayout(font_row)
+
+        self._mcp_checkbox = QCheckBox("Enable MCP Server")
+        self._mcp_checkbox.setToolTip(
+            f"Run the MCP (Model Context Protocol) server on {MCP_URL} so that "
+            "MCP clients can list captured sessions and send new requests."
+        )
+        self._mcp_checkbox.setChecked(self._config.mcp_enabled)
+        self._mcp_checkbox.toggled.connect(self.mcp_enabled_changed)
+        layout.addWidget(self._mcp_checkbox)
+
+        mcp_row = QHBoxLayout()
+        self._mcp_status_btn = QPushButton("MCP Status")
+        self._mcp_status_btn.setToolTip(
+            "Show the MCP server status and the client configuration snippet."
+        )
+        self._mcp_status_btn.setEnabled(self._mcp_checkbox.isChecked())
+        self._mcp_status_btn.clicked.connect(self.mcp_status_requested)
+        self._mcp_checkbox.toggled.connect(self._mcp_status_btn.setEnabled)
+        mcp_row.addWidget(self._mcp_status_btn)
+        mcp_row.addStretch()
+        layout.addLayout(mcp_row)
 
         layout.addStretch()
         return w
@@ -666,6 +690,7 @@ class OptionsDialog(QDialog):
         self._config.auto_adjust_content_length = self._cl_checkbox.isChecked()
         self._config.ssl_insecure = self._ssl_insecure_cb.isChecked()
         self._config.session_list_font_size = self._session_font_spin.value()
+        self._config.mcp_enabled = self._mcp_checkbox.isChecked()
 
         # SendTo: filter empty rows (name or address blank = empty)
         sendto_entries = []
@@ -681,6 +706,9 @@ class OptionsDialog(QDialog):
 
     def reject(self) -> None:
         self._config._data["settings"] = dict(self._original_data["settings"])
+        # The MCP server is started/stopped as soon as the checkbox is
+        # toggled, so restore the original state on Cancel.
+        self.mcp_enabled_changed.emit(self._config.mcp_enabled)
         super().reject()
 
     @property

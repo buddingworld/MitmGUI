@@ -42,6 +42,7 @@ class AppConfig:
             "raw_font_zoom": -2,  # QScintilla zoom level for Raw / New Session
             "raw_word_wrap": True,  # Word Wrap for Raw editors (on by default)
             "session_list_font_size": 15,
+            "mcp_enabled": False,  # MCP server listening on 127.0.0.1:7290
         },
         "sendto": [
             {"name": "Fiddler", "address": "http://127.0.0.1:8888"},
@@ -216,6 +217,14 @@ class AppConfig:
     @session_list_font_size.setter
     def session_list_font_size(self, val: int) -> None:
         self._data["settings"]["session_list_font_size"] = int(val)
+
+    @property
+    def mcp_enabled(self) -> bool:
+        return bool(self._data["settings"].get("mcp_enabled", False))
+
+    @mcp_enabled.setter
+    def mcp_enabled(self, val: bool) -> None:
+        self._data["settings"]["mcp_enabled"] = bool(val)
 
     # ── SendTo ──
 

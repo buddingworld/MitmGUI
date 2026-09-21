@@ -75,6 +75,7 @@ from mitmproxy.tools import cmdline
 from mitmproxy.tools.mitmgui import themes
 from mitmproxy.tools.mitmgui.config import AppConfig
 from mitmproxy.tools.mitmgui.master import MitmGuiMaster
+from mitmproxy.tools.mitmgui.mcp_server import MCP_URL, McpServer
 from mitmproxy.tools.mitmgui.session_list import SessionTableModel
 from mitmproxy.tools.mitmgui.websocket_window import WebSocketWindow
 
@@ -4167,6 +4168,75 @@ class ToolsDialog(QDialog):
             self._hex_left.setPlainText(f"Decode failed:\n{e}")
 
 
+class McpStatusDialog(QDialog):
+    """MCP server status plus a ready-to-paste client configuration."""
+
+    def __init__(self, server: McpServer, parent=None):
+        super().__init__(parent)
+        self._server = server
+        self.setWindowTitle("MCP Server Status")
+        self.setWindowIcon(_make_icon("code", "#00897B"))
+        self.setMinimumSize(560, 420)
+        self.resize(620, 500)
+
+        layout = QVBoxLayout(self)
+
+        status = server.status()
+
+        form = QFormLayout()
+        form.setContentsMargins(10, 10, 10, 4)
+
+        state = QLabel("\u25cf Running" if status["running"] else "\u25cf Stopped")
+        state.setStyleSheet(
+            "color: %s; font-weight: bold;"
+            % ("#2E7D32" if status["running"] else "#C62828")
+        )
+        form.addRow("Status:", state)
+
+        url = MCP_URL if status["running"] else status["url"]
+        form.addRow("Endpoint URL:", QLabel(url))
+        form.addRow("Transport:", QLabel(status["transport"]))
+        form.addRow("Tools:", QLabel(", ".join(status["tools"])))
+        form.addRow("Started:", QLabel(status["started_at"] or "N/A"))
+        form.addRow("Requests:", QLabel(str(status["request_count"])))
+        if status["error"]:
+            error = QLabel(status["error"])
+            error.setStyleSheet("color: #C62828;")
+            error.setWordWrap(True)
+            form.addRow("Error:", error)
+        layout.addLayout(form)
+
+        layout.addWidget(QLabel("Client configuration (paste into your MCP client):"))
+        self._config_edit = QPlainTextEdit(server.client_config())
+        self._config_edit.setReadOnly(True)
+        self._config_edit.setFont(QFont("Consolas", 10))
+        layout.addWidget(self._config_edit, 1)
+
+        buttons = QHBoxLayout()
+
+        copy_url = QPushButton("Copy URL")
+        copy_url.clicked.connect(lambda: self._copy(copy_url, url))
+        buttons.addWidget(copy_url)
+
+        copy_config = QPushButton("Copy Config")
+        copy_config.clicked.connect(lambda: self._copy(copy_config, server.client_config()))
+        buttons.addWidget(copy_config)
+
+        buttons.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        buttons.addWidget(close_btn)
+
+        layout.addLayout(buttons)
+
+    @staticmethod
+    def _copy(button: QPushButton, text: str) -> None:
+        QApplication.clipboard().setText(text)
+        original = button.text()
+        button.setText("Copied")
+        QTimer.singleShot(1200, lambda: button.setText(original))
+
+
 class MitmGuiMainWindow(QMainWindow):
     """Main window for mitmgui, styled after Fiddler Classic."""
 
@@ -4174,6 +4244,7 @@ class MitmGuiMainWindow(QMainWindow):
         super().__init__()
         self._config = config
         self._master = proxy_master
+        self._mcp_server = McpServer(proxy_master)
         self._bridge = _SignalBridge()
         self._bridge.flow_added.connect(self._on_flow_added)
         self._bridge.flow_updated.connect(self._on_flow_updated)
@@ -4229,6 +4300,8 @@ class MitmGuiMainWindow(QMainWindow):
         self._master.start()
         self._master.view.sig_view_add.connect(self._on_proxy_flow_add)
         self._master.view.sig_view_update.connect(self._on_proxy_flow_update)
+
+        self._set_mcp_enabled(self._config.mcp_enabled)
 
         self._proxy_toggle_action.setChecked(self._get_proxy_enabled())
         self._update_proxy_icon()
@@ -6766,7 +6839,29 @@ class MitmGuiMainWindow(QMainWindow):
         dlg = OptionsDialog(self._config, self)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.session_list_font_size_changed.connect(self._apply_session_list_font_size)
+        dlg.mcp_enabled_changed.connect(self._set_mcp_enabled)
+        dlg.mcp_status_requested.connect(self._open_mcp_status)
         dlg.finished.connect(lambda result: self._on_options_finished(dlg, result))
+        dlg.show()
+
+    def _set_mcp_enabled(self, enabled: bool) -> None:
+        """Start or stop the MCP server when the settings checkbox changes."""
+        if not enabled:
+            self._mcp_server.stop()
+            return
+        if self._mcp_server.is_running:
+            return
+        if not self._mcp_server.start():
+            QMessageBox.warning(
+                self,
+                "MCP Server Error",
+                f"Could not start the MCP server on {MCP_URL}:\n"
+                f"{self._mcp_server.error}",
+            )
+
+    def _open_mcp_status(self) -> None:
+        dlg = McpStatusDialog(self._mcp_server, self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.show()
 
     def _on_options_finished(self, dlg, result: int) -> None:
@@ -7518,6 +7613,7 @@ class MitmGuiMainWindow(QMainWindow):
         config.window_geometry = [geo.x(), geo.y(), geo.width(), geo.height()]
         config.window_maximized = self.isMaximized()
         config.save()
+        self._mcp_server.stop()
         self._master.stop()
         event.accept()
 
