@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from mitmproxy import http
 from mitmproxy.connection import Client, Server
+from mitmproxy.net.http.url import hostport
 
 MCP_HOST = "127.0.0.1"
 MCP_PORT = 7290
@@ -141,8 +142,12 @@ TOOLS = [
         "description": (
             "Send a new HTTP request through MitmGUI and return its "
             "session_id. Provide either `raw` (a complete raw HTTP request) "
-            "or `method` / `url` / `headers` / `body`. The response arrives "
-            "asynchronously and can be fetched with get_session afterwards."
+            "or `method` / `url` / `headers` / `body` / `http_version`. The "
+            "response arrives asynchronously and can be fetched with "
+            "get_session afterwards. Content-Length is always adjusted to "
+            "match `body`; with HTTP/1.1 a missing Host header is filled "
+            "from the URL, while HTTP/2 uses the :authority pseudo-header "
+            "instead of Host (per RFC 9113), so no Host header is added."
         ),
         "inputSchema": {
             "type": "object",
@@ -170,6 +175,15 @@ TOOLS = [
                 "body": {
                     "type": "string",
                     "description": "Request body sent as UTF-8 text.",
+                },
+                "http_version": {
+                    "type": "string",
+                    "enum": ["1.1", "2"],
+                    "description": (
+                        "HTTP protocol version of the request: '1.1' "
+                        "(default) or '2' (HTTP/2)."
+                    ),
+                    "default": "1.1",
                 },
             },
         },
@@ -506,6 +520,25 @@ def _apply_headers(request, headers) -> None:
             request.headers[str(name)] = str(value)
 
 
+def _parse_http_version(value) -> str:
+    """Accept "1.1" / "2" (or "HTTP/1.1" / "HTTP/2") -> mitmproxy version."""
+    if value is None or value == "":
+        return "HTTP/1.1"
+    text = str(value).strip().lower()
+    if text in ("1.1", "http/1.1"):
+        return "HTTP/1.1"
+    if text in ("2", "http/2", "http/2.0"):
+        return "HTTP/2.0"
+    raise ValueError(f"unsupported http_version {value!r}: use '1.1' or '2'")
+
+
+def _sync_content_length(request) -> None:
+    """Adjust Content-Length to match the actual request body."""
+    content = request.raw_content
+    if content and "transfer-encoding" not in request.headers:
+        request.headers["Content-Length"] = str(len(content))
+
+
 def _build_flow(args: dict) -> http.HTTPFlow:
     raw = args.get("raw")
     if raw:
@@ -513,7 +546,9 @@ def _build_flow(args: dict) -> http.HTTPFlow:
         # entry points accept the same raw format.
         from mitmproxy.tools.mitmgui.main_window import NewSessionDialog
 
-        return NewSessionDialog._parse_raw_to_flow(str(raw))
+        flow = NewSessionDialog._parse_raw_to_flow(str(raw))
+        _sync_content_length(flow.request)
+        return flow
 
     method = (args.get("method") or "").strip()
     url = (args.get("url") or "").strip()
@@ -524,10 +559,21 @@ def _build_flow(args: dict) -> http.HTTPFlow:
     content = body.encode("utf-8") if isinstance(body, str) else b""
 
     request = http.Request.make(method.upper(), url, content, http.Headers())
+    request.http_version = _parse_http_version(args.get("http_version"))
     _apply_headers(request, args.get("headers"))
-    if not content:
+    # Content-Length always follows the actual body, so a stale or missing
+    # value in `headers` cannot desynchronize it.
+    if content:
+        request.headers["Content-Length"] = str(len(content))
+    else:
         # Request.make() always sets Content-Length; drop it for a bodyless request.
         request.headers.pop("content-length", None)
+    # HTTP/1.1 requires a Host header: fill it from the URL when the caller
+    # did not provide one. HTTP/2 replaces Host with the :authority
+    # pseudo-header (RFC 9113); mitmproxy derives :authority from the request
+    # host/port, so no Host header is added for HTTP/2.
+    if request.http_version == "HTTP/1.1" and "host" not in request.headers:
+        request.headers["Host"] = hostport(request.scheme, request.host, request.port)
 
     client_conn = Client(peername=("127.0.0.1", 0), sockname=("127.0.0.1", 0))
     server_conn = Server(address=(request.host, request.port))

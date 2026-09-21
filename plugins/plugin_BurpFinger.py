@@ -443,7 +443,7 @@ class Plugin:
 
         - 会话列表 Info 列：``_plugin_info``（含类型，用于着色）；
         - 会话 Properties：``Finger``（匹配的 name 列表）；
-        - Logs - Plugin：Type=Info，Message=匹配的 name 列表，Comment 为空。
+        - Logs - Plugin：Type=Info，Message=匹配的 name 列表 + 该 flow 的 URL。
         """
         try:
             if not getattr(flow, "metadata", None):
@@ -456,6 +456,11 @@ class Plugin:
             flow.metadata["_plugin_info"] = merged
             flow.metadata["Finger"] = [item["name"] for item in merged]
             api.view.set_info(flow, merged)
-            api.logs.add(", ".join(flow.metadata["Finger"]), log_type="Info")
+            # 日志：命中指纹列表 + 该 flow 的 URL（便于回溯具体请求）
+            message = ", ".join(flow.metadata["Finger"])
+            req = getattr(flow, "request", None)
+            if req is not None:
+                message = f"{message} {req.pretty_url}"
+            api.logs.add(message, log_type="Info")
         except Exception:
             pass

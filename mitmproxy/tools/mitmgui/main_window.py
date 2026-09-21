@@ -3295,6 +3295,7 @@ class LogsDialog(QDialog):
 
         self._tabs = QTabWidget()
         self._tables: dict[str, QTableWidget] = {}
+        self._columns_rebalanced: set[str] = set()
         for category in self.LOG_CATEGORIES:
             cols = self.COLUMNS[category]
             table = QTableWidget(0, len(cols))
@@ -3307,17 +3308,49 @@ class LogsDialog(QDialog):
             table.setAlternatingRowColors(True)
             table.setWordWrap(False)
             table.setColumnWidth(0, 190)  # time column
-            # Message: 250% of the default 100px width. The extra space is
-            # taken from the Comment column, which stretches to fill the rest.
+            # Message: 250% of the default 100px width; the Comment column
+            # stretches to fill the rest. Once the tab is shown, half of
+            # Comment's width is moved over to Message.
             table.setColumnWidth(cols.index("Message"), 250)
             table.horizontalHeader().setStretchLastSection(True)
             self._tables[category] = table
             self._tabs.addTab(table, category)
+        self._tabs.currentChanged.connect(self._on_tab_changed)
         layout.addWidget(self._tabs)
 
         # Export button on the right of the tab row (no-op for now).
         export_btn = QPushButton("Export")
         self._tabs.setCornerWidget(export_btn, Qt.Corner.TopRightCorner)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._rebalance_columns(self._tabs.widget(self._tabs.currentIndex()))
+
+    def _on_tab_changed(self, index: int) -> None:
+        self._rebalance_columns(self._tabs.widget(index))
+
+    def _rebalance_columns(self, table) -> None:
+        """Shrink Comment by half and give the freed width to Message.
+
+        Comment is the stretching last section, so widening Message takes
+        exactly the same amount back from it. A table only has a meaningful
+        width once it is laid out as the visible tab, so the rebalance runs
+        on the next event-loop pass.
+        """
+        category = next(
+            (c for c, t in self._tables.items() if t is table), None
+        )
+        if category is None or category in self._columns_rebalanced:
+            return
+        self._columns_rebalanced.add(category)
+        QTimer.singleShot(0, lambda c=category: self._shift_comment_to_message(c))
+
+    def _shift_comment_to_message(self, category: str) -> None:
+        table = self._tables[category]
+        cols = self.COLUMNS[category]
+        msg_idx = cols.index("Message")
+        shift = table.columnWidth(cols.index("Comment")) // 2
+        table.setColumnWidth(msg_idx, table.columnWidth(msg_idx) + shift)
 
     def append_log(self, category: str, message: str, log_type: str = "Info",
                    comment=None) -> None:

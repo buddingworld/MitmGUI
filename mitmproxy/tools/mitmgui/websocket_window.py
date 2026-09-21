@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -126,14 +127,21 @@ def _session_last_time(flow) -> str:
     return ""
 
 
-def _session_title(flow) -> str:
-    """Host (plus non-default port) and path of the WebSocket handshake."""
+def _session_title(flow, max_chars: int = 0) -> str:
+    """Host (plus non-default port) and path of the WebSocket handshake.
+
+    With ``max_chars`` set, anything beyond that many characters is replaced
+    with an ellipsis (used for window titles and session list rows).
+    """
     request = flow.request
     host = request.host or "?"
     if request.port not in (80, 443):
         host = f"{host}:{request.port}"
     path = request.path or "/"
-    return host if path == "/" else f"{host}{path}"
+    title = host if path == "/" else f"{host}{path}"
+    if max_chars and len(title) > max_chars:
+        title = title[:max_chars] + "…"
+    return title
 
 
 def _session_preview(flow) -> str:
@@ -216,7 +224,7 @@ class _SessionRow(QWidget):
         self.update_flow(flow)
 
     def update_flow(self, flow) -> None:
-        self.title.setText(_session_title(flow))
+        self.title.setText(_session_title(flow, max_chars=80))
         self.preview.setText(_session_preview(flow))
         self.time.setText(_session_last_time(flow))
 
@@ -370,7 +378,9 @@ class WebSocketWindow(QDialog):
         from mitmproxy.tools.mitmgui.main_window import FlowDetailDialog
 
         dialog = FlowDetailDialog(flow, self)
-        dialog.setWindowTitle(f"WebSocket Handshake - {_session_title(flow)}")
+        dialog.setWindowTitle(
+            f"WebSocket Handshake - {_session_title(flow, max_chars=80)}"
+        )
         dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.show()
         dialog.raise_()
@@ -417,7 +427,8 @@ class _MessageViewDialog(QDialog):
 
     REFRESH_MS = 400
     MAX_BUBBLE_WIDTH = 520
-    MAX_BODY_CHARS = 4000
+    #: messages taller than this many lines collapse behind a "Show more" link
+    PREVIEW_LINES = 3
 
     def __init__(self, master, flow, parent=None):
         super().__init__(parent)
@@ -425,7 +436,7 @@ class _MessageViewDialog(QDialog):
         self._flow = flow
         self._shown = 0  # number of messages already rendered as bubbles
 
-        self.setWindowTitle(f"WebSocket - {_session_title(flow)}")
+        self.setWindowTitle(f"WebSocket - {_session_title(flow, max_chars=80)}")
         self.setWindowIcon(_ws_icon())
         self.resize(760, 620)
 
@@ -433,8 +444,15 @@ class _MessageViewDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(6)
 
-        self._header = QLabel()
-        self._header.setTextFormat(Qt.TextFormat.PlainText)
+        # Session URL: a read-only, wrapping, selectable text box. A QLabel
+        # either forces the window wide (an URL is one long "word" and sets
+        # the minimum width) or cannot be copied from, so QTextEdit is used.
+        self._header = QTextEdit()
+        self._header.setReadOnly(True)
+        self._header.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
         layout.addWidget(self._header)
 
         scroll = QScrollArea()
@@ -533,10 +551,6 @@ class _MessageViewDialog(QDialog):
             header += " · dropped"
 
         body = _render(message.content, message.is_text)
-        if len(body) > self.MAX_BODY_CHARS:
-            body = body[: self.MAX_BODY_CHARS] + (
-                f"\n... ({len(body) - self.MAX_BODY_CHARS} more characters)"
-            )
 
         bubble = QWidget()
         bubble.setMaximumWidth(self.MAX_BUBBLE_WIDTH)
@@ -561,9 +575,39 @@ class _MessageViewDialog(QDialog):
         content.setMaximumWidth(self.MAX_BUBBLE_WIDTH - 20)
         content.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
         content.setStyleSheet("background: transparent;")
         column.addWidget(content)
+
+        width = self.MAX_BUBBLE_WIDTH - 20
+        preview_h = content.fontMetrics().lineSpacing() * self.PREVIEW_LINES
+        if content.heightForWidth(width) > preview_h + 2:
+            # Trim the preview until it fits PREVIEW_LINES lines (wide glyphs
+            # such as CJK wrap differently than a plain char estimate), clamp
+            # the label height, and offer a tail link that restores the full
+            # selectable text.
+            char_w = content.fontMetrics().horizontalAdvance("0") or 1
+            preview = body[: width // char_w * self.PREVIEW_LINES]
+            while preview:
+                content.setText(preview.rstrip() + "…")
+                if content.heightForWidth(width) <= preview_h + 2:
+                    break
+                preview = preview[: len(preview) * 9 // 10]
+            else:
+                content.setText("…")
+            content.setMaximumHeight(preview_h)
+            more = QLabel('<a href="#more">Show more</a>')
+            more.setTextFormat(Qt.TextFormat.RichText)
+            more.setTextInteractionFlags(
+                Qt.TextInteractionFlag.LinksAccessibleByMouse
+            )
+            more.setStyleSheet("background: transparent; font-size: 10px;")
+            more.linkActivated.connect(
+                lambda _=None, m=message, c=content, w=more:
+                    self._expand_bubble(m, c, w)
+            )
+            column.addWidget(more)
 
         row = QWidget()
         line = QHBoxLayout(row)
@@ -576,6 +620,12 @@ class _MessageViewDialog(QDialog):
             line.addStretch(1)
         self._bubbles.insertWidget(self._bubbles.count() - 1, row)
 
+    def _expand_bubble(self, message, content: QLabel, more: QLabel) -> None:
+        """Replace a collapsed 3-line preview with the full message text."""
+        content.setText(_render(message.content, message.is_text) or "(empty)")
+        content.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX: undo the clamp
+        more.deleteLater()
+
     def _update_header(self) -> None:
         data = self._flow.websocket
         if self._flow.live:
@@ -586,7 +636,12 @@ class _MessageViewDialog(QDialog):
                 sender = "client" if data.closed_by_client else "server"
                 reason = f" {data.close_reason}" if data.close_reason else ""
                 text += f" (by {sender}, {data.close_code}{reason})"
-        self._header.setText(text)
+        self._header.setPlainText(text)
+        # Auto-fit the box to the wrapped URL, capped at ~5 lines; longer
+        # URLs get a vertical scrollbar instead of eating the window.
+        fm = self._header.fontMetrics()
+        doc_h = int(self._header.document().size().height())
+        self._header.setFixedHeight(min(doc_h + 10, fm.lineSpacing() * 5 + 10))
 
     # ── manual sending ──
 
