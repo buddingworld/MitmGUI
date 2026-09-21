@@ -271,14 +271,60 @@ class _AutoRulesAddon:
     # ── Replace helpers ──
 
     @staticmethod
+    def _normalize_replacement(destination: str) -> str:
+        """Convert a user written Destination into a valid ``re.sub`` template.
+
+        Group references (``\\1``..``\\99``, ``\\g<name>``) and the usual escape
+        sequences (``\\n``, ``\\t``, ``\\\\``, ...) are kept, every other
+        ``\\X`` is treated as the literal character ``X``. Without this, ``\\{``
+        would be kept as ``\\{`` (backslash + brace) and ``\\d`` would raise
+        ``re.error``, silently cancelling the whole replacement.
+        """
+        out: list[str] = []
+        i = 0
+        n = len(destination)
+        while i < n:
+            char = destination[i]
+            if char != "\\":
+                out.append(char)
+                i += 1
+                continue
+            if i + 1 >= n:  # lone trailing backslash -> literal
+                out.append("\\\\")
+                break
+            nxt = destination[i + 1]
+            if nxt.isdigit():
+                # Keep the digit run; up to two digits form a group reference.
+                j = i + 1
+                while j < n and destination[j].isdigit():
+                    j += 1
+                out.append(destination[i:j])
+                i = j
+                continue
+            if nxt == "g" and destination.startswith("g<", i + 1):
+                end = destination.find(">", i + 3)
+                if end != -1:
+                    out.append(destination[i:end + 1])
+                    i = end + 1
+                    continue
+            if nxt == "\\":
+                out.append("\\\\")
+            elif nxt in "ntrfva":
+                out.append("\\" + nxt)
+            else:
+                out.append(nxt)
+            i += 2
+        return "".join(out)
+
+    @staticmethod
     def _apply_replace_text(text: str, source: str, destination: str, rtype: str) -> str:
         if not source:
             return text
         if rtype == "Regex":
             import re
             try:
-                return re.sub(source, destination, text)
-            except re.error:
+                return re.sub(source, _AutoRulesAddon._normalize_replacement(destination), text)
+            except (re.error, IndexError):  # bad regex or unknown group reference
                 return text
         return text.replace(source, destination)
 
