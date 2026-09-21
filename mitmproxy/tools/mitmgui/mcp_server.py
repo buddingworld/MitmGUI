@@ -537,6 +537,7 @@ def _build_flow(args: dict) -> http.HTTPFlow:
 
 
 async def _send_flow(master, flow: http.HTTPFlow) -> None:
+    flow.metadata["_mcp"] = True  # shown as "MCP" in the session list Info column
     master.view.add([flow])
     master.replay_flow(flow)
 
