@@ -68,6 +68,7 @@ def parse(server_spec: str, default_scheme: str) -> ServerSpec:
         "dns",
         "quic",
         "socks5",
+        "socks5h",
     ):
         raise ValueError(f"Invalid server scheme: {scheme}")
 

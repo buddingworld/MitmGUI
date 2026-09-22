@@ -19,6 +19,7 @@ from mitmproxy.connection import ConnectionState
 from mitmproxy.connection import Server
 from mitmproxy.hooks import UpdateHook
 from mitmproxy.log import ALERT
+from mitmproxy.net.http import url
 from mitmproxy.options import Options
 from mitmproxy.proxy import commands
 from mitmproxy.proxy import events
@@ -105,10 +106,34 @@ class ReplayHandler(server.ConnectionHandler):
 
         super().__init__(context)
 
-        if flow.server_conn.via or (options.mode and options.mode[0].startswith("upstream:")):
+        # Decide the request-line form from the effective upstream gateway:
+        #  - HTTP(S) upstream proxy: absolute-form (RFC 9112 §3.2.2), which is
+        #    what an HTTP proxy needs to route the request.
+        #  - No proxy, or a SOCKS5 proxy (a byte-transparent tunnel that
+        #    forwards the request as-is): standard origin-form (RFC 9112 §3.2.1).
+        via_scheme = flow.server_conn.via[0] if flow.server_conn.via else None
+        is_h2_or_h3 = flow.request.is_http2 or flow.request.is_http3
+        if via_scheme in ("http", "https"):
             self.layer = layers.HttpLayer(context, HTTPMode.upstream)
+            # The HTTP layer derives server.via from client.proxy_mode and
+            # asserts an UpstreamMode there; a replay context copied from a
+            # regular-mode client would trip that assert.
+            if not isinstance(client.proxy_mode, UpstreamMode):
+                host, port = flow.server_conn.via[1]
+                host = f"[{host}]" if ":" in host else host
+                mode = UpstreamMode.parse(f"upstream:{via_scheme}://{host}:{port}")
+                mode.auth = flow.server_conn.via_auth
+                client.proxy_mode = mode
+            if not is_h2_or_h3 and not flow.request.authority:
+                flow.request.authority = url.hostport(
+                    flow.request.scheme, flow.request.host, flow.request.port
+                )
         else:
             self.layer = layers.HttpLayer(context, HTTPMode.transparent)
+            if not is_h2_or_h3:
+                # Origin-form on the wire; HTTP/2 keeps :authority (it becomes
+                # the Host header when converted to HTTP/1).
+                flow.request.authority = ""
         self.layer.connections[client] = MockServer(flow, context.fork())
         self.flow = flow
         self.done = asyncio.Event()

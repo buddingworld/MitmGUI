@@ -216,14 +216,14 @@ class UpstreamMode(ProxyMode):
 
     description = "HTTP(S) proxy (upstream mode)"
     transport_protocol = TCP
-    scheme: Literal["http", "https", "socks5"]
+    scheme: Literal["http", "https", "socks5", "socks5h"]
     address: tuple[str, int]
     auth: tuple[str, str] | None = None
 
     # noinspection PyDataclass
     def __post_init__(self) -> None:
         data = self.data
-        if data.lower().startswith("socks5://"):
+        if data.lower().startswith(("socks5://", "socks5h://")):
             parsed = urlsplit(data)
             if parsed.username is not None or parsed.password is not None:
                 if parsed.username is None or parsed.password is None:
@@ -232,9 +232,10 @@ class UpstreamMode(ProxyMode):
                 host = parsed.hostname
                 if host is None or parsed.port is None:
                     raise ValueError("Invalid SOCKS5 proxy address")
-                data = f"socks5://{host}:{parsed.port}"
+                scheme_prefix, _, _ = data.partition("://")
+                data = f"{scheme_prefix.lower()}://{host}:{parsed.port}"
         scheme, self.address = server_spec.parse(data, default_scheme="http")
-        if scheme not in ("http", "https", "socks5"):
+        if scheme not in ("http", "https", "socks5", "socks5h"):
             raise ValueError("invalid upstream proxy scheme")
         self.scheme = scheme
 

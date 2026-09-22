@@ -123,12 +123,15 @@ class HttpUpstreamProxy(tunnel.TunnelLayer):
     def make(cls, ctx: context.Context, send_connect: bool) -> tunnel.LayerStack:
         assert ctx.server.via
         scheme, address = ctx.server.via
-        assert scheme in ("http", "https", "socks5")
+        assert scheme in ("http", "https", "socks5", "socks5h")
 
         upstream_proxy = connection.Server(address=address)
 
         stack = tunnel.LayerStack()
-        if scheme == "socks5":
+        if scheme in ("socks5", "socks5h"):
+            # SOCKS5 CONNECT requests carry the target hostname, so DNS
+            # resolution happens at the proxy for both schemes — "socks5h"
+            # is accepted as an explicit alias for that behavior.
             stack /= Socks5UpstreamProxy(ctx, upstream_proxy, ctx.server.via_auth)
         else:
             if scheme == "https":

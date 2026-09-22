@@ -510,7 +510,9 @@ class OptionsDialog(QDialog):
             if self._config.manual_proxy != "http://127.0.0.1:8888"
             else ""
         )
-        self._gw_manual_edit.setPlaceholderText("http://127.0.0.1:8888")
+        self._gw_manual_edit.setPlaceholderText(
+            "http://127.0.0.1:8888 / socks5://127.0.0.1:1080"
+        )
         self._gw_manual_edit.textChanged.connect(lambda: setattr(self, "_modified", True))
         self._gw_manual_edit.setEnabled(gw_mode == "manual")
         manual_row.addWidget(self._gw_manual_edit)
@@ -549,8 +551,10 @@ class OptionsDialog(QDialog):
 
             proxy = self._gw_manual_edit.text().strip()
             parsed = urlparse(proxy)
-            if parsed.scheme.lower() not in ("http", "https", "socks5"):
-                errors.append("Upstream proxy must use http://, https://, or socks5://.")
+            if parsed.scheme.lower() not in ("http", "https", "socks5", "socks5h"):
+                errors.append(
+                    "Upstream proxy must use http://, https://, socks5://, or socks5h://."
+                )
             elif not parsed.hostname or not parsed.port:
                 errors.append("Upstream proxy must include a host and port.")
         return errors
