@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -2412,6 +2413,110 @@ class _ClickableStatusLabel(QLabel):
             super().mousePressEvent(event)
 
 
+class _ColorCombo(QComboBox):
+    """Color combo with swatch previews and a trailing 自定义颜色 entry.
+
+    Every preset item renders its QColor as the item background (same as the
+    Ctrl + F find dialog). Selecting the trailing 自定义颜色... entry opens a
+    non-blocking QColorDialog (its Pick Screen Color button works like the
+    eyedropper on peiseka.com); confirming inserts the picked color as a new
+    entry whose text is the hex RGB value and selects it.
+    """
+
+    CUSTOM_ENTRY = "\u81ea\u5b9a\u4e49\u989c\u8272..."
+
+    def __init__(self, choices: list[tuple[str, QColor | None]], parent=None):
+        super().__init__(parent)
+        self._choices = list(choices)
+        self._custom_index: int | None = None
+        self._picker: QColorDialog | None = None
+        self._last_text = ""
+        for name, color in self._choices:
+            self.addItem(name)
+            if color is not None:
+                self.setItemData(
+                    self.count() - 1, color, Qt.ItemDataRole.BackgroundRole
+                )
+        self.addItem(self.CUSTOM_ENTRY)
+        self.setCurrentIndex(0)
+        self._last_text = self.currentText()
+        self.currentTextChanged.connect(self._on_current_changed)
+
+    def current_color(self) -> QColor | None:
+        """QColor of the current selection; None for 无 / pending custom."""
+        text = self.currentText()
+        if text == self.CUSTOM_ENTRY:
+            return None
+        for name, color in self._choices:
+            if name == text:
+                return color
+        if text.startswith("#"):
+            picked = QColor(text)
+            if picked.isValid():
+                return picked
+        return None
+
+    def current_value(self) -> str:
+        """Stored value: preset name, hex string, or '' (无 / pending custom)."""
+        text = self.currentText()
+        return "" if text == self.CUSTOM_ENTRY else text
+
+    def set_color_value(self, value: str) -> bool:
+        """Select the entry for a stored value (preset name or hex string)."""
+        if not isinstance(value, str) or not value:
+            return False
+        idx = self.findText(value)
+        if idx >= 0:
+            self.setCurrentIndex(idx)
+            return True
+        if value.startswith("#"):
+            picked = QColor(value)
+            if picked.isValid():
+                self._set_custom_color(picked)
+                return True
+        return False
+
+    # ── internals ──
+
+    def _on_current_changed(self, text: str) -> None:
+        if text != self.CUSTOM_ENTRY:
+            self._last_text = text
+            return
+        # The placeholder entry is only a launcher: open the color picker and
+        # restore the previous selection while the (non-blocking) dialog is up.
+        self._open_picker()
+        idx = self.findText(self._last_text)
+        if idx >= 0:
+            self.setCurrentIndex(idx)
+
+    def _open_picker(self) -> None:
+        dlg = QColorDialog(self)
+        dlg.setWindowTitle("\u81ea\u5b9a\u4e49\u989c\u8272")
+        # Non-native dialog: supports non-modal use and keeps the
+        # "Pick Screen Color" eyedropper, which returns an RGB value.
+        dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+        dlg.setOption(QColorDialog.ColorDialogOption.ShowAlphaChannel, False)
+        dlg.setWindowModality(Qt.WindowModality.NonModal)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.colorSelected.connect(self._set_custom_color)
+        dlg.show()
+        # Keep a reference until the dialog closes.
+        self._picker = dlg
+
+    def _set_custom_color(self, color: QColor) -> None:
+        if not color.isValid():
+            return
+        name = color.name()  # "#rrggbb"
+        if self._custom_index is None:
+            self._custom_index = self.findText(self.CUSTOM_ENTRY)
+            self.insertItem(self._custom_index, name)
+        self.setItemText(self._custom_index, name)
+        self.setItemData(
+            self._custom_index, color, Qt.ItemDataRole.BackgroundRole
+        )
+        self.setCurrentIndex(self._custom_index)
+
+
 class AutoRuleDialog(QDialog):
     """Dialog for adding or editing a single Auto Rule."""
 
@@ -2483,9 +2588,7 @@ class AutoRuleDialog(QDialog):
         # ── Value rows (only the ones for the selected Action are shown) ──
         # They live in the same form right below "Action", so the spacing is
         # identical to the other rows and no large gap can appear.
-        self._color_combo = QComboBox()
-        for name, _ in self.COLOR_CHOICES:
-            self._color_combo.addItem(name)
+        self._color_combo = _ColorCombo(self.COLOR_CHOICES)
         form.addRow("Value", self._color_combo)
         self._color_row = form.rowCount() - 1
 
@@ -2556,9 +2659,7 @@ class AutoRuleDialog(QDialog):
             if action == "Color":
                 saved_color = rule.get("value")
                 if isinstance(saved_color, str):
-                    idx = self._color_combo.findText(saved_color)
-                    if idx >= 0:
-                        self._color_combo.setCurrentIndex(idx)
+                    self._color_combo.set_color_value(saved_color)
             elif action == "Response With":
                 v = rule.get("value")
                 if isinstance(v, str):
@@ -2639,7 +2740,7 @@ class AutoRuleDialog(QDialog):
             return
         action = self._action_cb.currentText()
         if action == "Color":
-            value = self._color_combo.currentText()
+            value = self._color_combo.current_value()
         elif action == "Response With":
             value = self._response_with_edit.toPlainText()
         elif action == "Response With File":
@@ -2963,11 +3064,7 @@ class FindDialog(QDialog):
         # Highlight color
         color_layout = QHBoxLayout()
         color_layout.addWidget(QLabel("\u5339\u914d\u7ed3\u679c\u989c\u8272\uff1a"))
-        self._color_combo = QComboBox()
-        for i, (name, color) in enumerate(self.HIGHLIGHT_COLORS):
-            self._color_combo.addItem(name)
-            if color is not None:
-                self._color_combo.setItemData(i, color, Qt.ItemDataRole.BackgroundRole)
+        self._color_combo = _ColorCombo(self.HIGHLIGHT_COLORS)
         self._color_combo.setCurrentIndex(1)  # Default: Color 1
         color_layout.addWidget(self._color_combo)
         color_layout.addStretch()
@@ -2999,12 +3096,7 @@ class FindDialog(QDialog):
         match_case = self._match_case.isChecked()
         use_regex = self._regex.isChecked()
         unmark_old = self._unmark_old.isChecked()
-        color_name = self._color_combo.currentText()
-        color = None
-        for name, c in self.HIGHLIGHT_COLORS:
-            if name == color_name:
-                color = c
-                break
+        color = self._color_combo.current_color()
 
         # Unmark old results (clear all flow colors)
         if unmark_old:
@@ -7188,6 +7280,11 @@ class MitmGuiMainWindow(QMainWindow):
                     if name == cname:
                         color = c
                         break
+                # Custom colors are stored as their hex RGB value.
+                if color is None and isinstance(cname, str) and cname.startswith("#"):
+                    picked = QColor(cname)
+                    if picked.isValid():
+                        color = picked
                 break
         if found:
             self._session_model.set_flow_color(flow, color)
