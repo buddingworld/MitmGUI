@@ -36,3 +36,5 @@ web/coverage/
 certs/
 /*.json
 hosts.txt
+# local rules script, kept out of version control
+rules.py
