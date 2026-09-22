@@ -1645,12 +1645,19 @@ class InspectorPanel(QWidget):
                 # Keep authority/Host aligned with the edited Raw headers. For
                 # hosts-remapped flows, the Raw request line shows the original
                 # authority, while request.host/port hold the remapped target.
+                # HTTP/2 and HTTP/3 carry the host in the :authority
+                # pseudo-header; HTTP/1.x is left untouched so that a direct
+                # request stays in origin-form instead of being turned into an
+                # absolute-form one (RFC 9112 §3.2.2) — a non-empty authority is
+                # only correct for requests captured through an HTTP upstream
+                # proxy, which is exactly when the flow already has one.
                 explicit_host = req.headers.get("host", None)
-                req.authority = (
-                    explicit_host
-                    or getattr(flow, "_original_host", None)
-                    or hostport(req.scheme, req.host, req.port)
-                )
+                if req.is_http2 or req.is_http3:
+                    req.authority = (
+                        explicit_host
+                        or getattr(flow, "_original_host", None)
+                        or hostport(req.scheme, req.host, req.port)
+                    )
 
                 # Body is everything after the header block.  The line that
                 # ended the headers is either the blank separator (the body
@@ -3300,6 +3307,10 @@ class NewSessionDialog(QDialog):
             method = request_parts[0].upper()
             url_str = request_parts[1]
             http_version = request_parts[2].strip() if len(request_parts) > 2 else "HTTP/1.1"
+            # mitmproxy spells the h2 version "HTTP/2.0"; normalize a pasted
+            # "HTTP/2" so it is recognized as HTTP/2 below.
+            if http_version.upper() == "HTTP/2":
+                http_version = "HTTP/2.0"
         except (IndexError, ValueError) as e:
             raise ValueError(f"Invalid request line: {e}")
 
@@ -3336,12 +3347,24 @@ class NewSessionDialog(QDialog):
         # Preserve the HTTP version from the original request line
         # (Request.make() always hardcodes HTTP/1.1).
         req.http_version = http_version
-        # Preserve an explicitly supplied Host header. Request.make() and the
-        # authority setter derive Host from the URL, but New Session needs to
-        # support a different connection target and Host header.
-        req.authority = explicit_host or hostport(req.scheme, req.host, req.port)
+        # Request.make() derives Host from the URL; restore the Host the user
+        # pasted, which may name a different virtual host than the connection
+        # target.
         if explicit_host:
             req.headers["Host"] = explicit_host
+        if req.is_http2 or req.is_http3:
+            # HTTP/2 and HTTP/3 carry the host in the :authority pseudo-header
+            # instead of a Host header (RFC 9113 §8.3.1).
+            req.authority = explicit_host or hostport(req.scheme, req.host, req.port)
+            req.headers.pop("Host", None)
+        else:
+            # A non-empty authority switches the request line to absolute-form
+            # (RFC 9112 §3.2.2), but the target server expects origin-form.
+            req.authority = ""
+            # HTTP/1.1 requires a Host header (RFC 9112 §3.2); fall back to the
+            # URL's authority when the pasted packet has none.
+            if not explicit_host:
+                req.headers["Host"] = hostport(req.scheme, req.host, req.port)
         # If body is empty and no Content-Length was in the user's raw headers,
         # remove the auto-added Content-Length: 0 (e.g. for GET requests).
         if not content and not had_content_length:
