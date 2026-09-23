@@ -569,10 +569,15 @@ def _build_flow(args: dict) -> http.HTTPFlow:
         # Request.make() always sets Content-Length; drop it for a bodyless request.
         request.headers.pop("content-length", None)
     # HTTP/1.1 requires a Host header: fill it from the URL when the caller
-    # did not provide one. HTTP/2 replaces Host with the :authority
-    # pseudo-header (RFC 9113); mitmproxy derives :authority from the request
-    # host/port, so no Host header is added for HTTP/2.
-    if request.http_version == "HTTP/1.1" and "host" not in request.headers:
+    # did not provide one. HTTP/2 carries the host in the :authority
+    # pseudo-header (RFC 9113 §8.3.1): a caller-provided Host header becomes
+    # :authority (the header is kept, mirroring the New Session dialog), with
+    # the URL authority as fallback.
+    if request.is_http2 or request.is_http3:
+        request.authority = request.headers.get("host") or hostport(
+            request.scheme, request.host, request.port
+        )
+    elif request.http_version == "HTTP/1.1" and "host" not in request.headers:
         request.headers["Host"] = hostport(request.scheme, request.host, request.port)
 
     client_conn = Client(peername=("127.0.0.1", 0), sockname=("127.0.0.1", 0))

@@ -370,22 +370,41 @@ def format_h2_request_headers(
         (b":scheme", event.request.data.scheme),
         (b":path", event.request.data.path),
     ]
-    if event.request.authority:
-        pseudo_headers.append((b":authority", event.request.data.authority))
-
-    if event.request.is_http2 or event.request.is_http3:
-        hdrs = list(event.request.headers.fields)
-        if not event.request.authority:
-            # HTTP/2 requires :authority.  Derive it from the request host/port
-            # (parsed from the absolute URL), not from the Host header which
-            # may be absent or inconsistent.
-            from mitmproxy.net.http.url import hostport
-            authority_val = hostport(
-                event.request.scheme,
-                event.request.host,
-                event.request.port,
-            )
-            pseudo_headers.append((b":authority", authority_val.encode()))
+    is_h2_or_h3 = event.request.is_http2 or event.request.is_http3
+    if is_h2_or_h3:
+        # An explicitly set Host header (GUI edit, auto rule, or user script)
+        # overrides the inherited :authority, so that manually setting the
+        # Host header works for HTTP/2 the same way it does for HTTP/1.x.
+        # (RFC 9113 §8.3.1 carries the host in the :authority pseudo-header,
+        # and a request with :authority must not also carry a Host header.)
+        host_hdr = None
+        for name, value in event.request.headers.fields:
+            if name.lower() == b"host":
+                host_hdr = value
+                break
+        if host_hdr is not None:
+            if host_hdr.strip():
+                event.request.data.authority = host_hdr.strip()
+            pseudo_headers.append((b":authority", event.request.data.authority))
+            hdrs = [
+                (name, value)
+                for name, value in event.request.headers.fields
+                if name.lower() != b"host"
+            ]
+        else:
+            if event.request.authority:
+                pseudo_headers.append((b":authority", event.request.data.authority))
+            else:
+                # HTTP/2 requires :authority.  Derive it from the request
+                # host/port (parsed from the absolute URL).
+                from mitmproxy.net.http.url import hostport
+                authority_val = hostport(
+                    event.request.scheme,
+                    event.request.host,
+                    event.request.port,
+                )
+                pseudo_headers.append((b":authority", authority_val.encode()))
+            hdrs = list(event.request.headers.fields)
         if context.options.normalize_outbound_headers:
             yield from normalize_h2_headers(hdrs)
     else:

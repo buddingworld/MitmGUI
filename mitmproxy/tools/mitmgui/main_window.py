@@ -381,6 +381,18 @@ def _format_request_raw(flow, encoding: str = DEFAULT_ENCODING) -> str:
     else:
         request_url = r.url
     lines = [f"{r.method} {request_url} {r.http_version}"]
+    # HTTP/2 and HTTP/3 carry the host in the :authority pseudo-header, so
+    # headers.fields has no Host line. Expose one (mirroring :authority) so
+    # the Raw view can show and edit the host like on HTTP/1.x; saving the
+    # edit syncs it back to :authority (apply_request_edits) and the h2/h3
+    # writer lifts an explicit Host header over :authority on the wire.
+    if (
+        (r.is_http2 or r.is_http3)
+        and r.first_line_format != "authority"
+        and "host" not in r.headers
+        and r.authority
+    ):
+        lines.append(f"Host: {r.authority}")
     for k, v in r.headers.fields:
         k_dec = k.decode("utf-8", errors="replace").replace("\ufffd", "??") if isinstance(k, bytes) else str(k)
         v_dec = v.decode(encoding, errors="replace").replace("\ufffd", "??") if isinstance(v, bytes) else str(v)
@@ -1622,7 +1634,12 @@ class InspectorPanel(QWidget):
                                     _s = (parsed.scheme or req.scheme).lower()
                                     req.port = 443 if _s == "https" else 80
                     if len(parts) > 2:
-                        req.http_version = parts[2].rstrip("\r")
+                        version = parts[2].rstrip("\r")
+                        # mitmproxy spells the h2 version "HTTP/2.0"; normalize
+                        # a pasted "HTTP/2" so request.is_http2 recognizes it.
+                        if version.upper() == "HTTP/2":
+                            version = "HTTP/2.0"
+                        req.http_version = version
                 except (IndexError, ValueError):
                     pass
 
@@ -3354,9 +3371,14 @@ class NewSessionDialog(QDialog):
             req.headers["Host"] = explicit_host
         if req.is_http2 or req.is_http3:
             # HTTP/2 and HTTP/3 carry the host in the :authority pseudo-header
-            # instead of a Host header (RFC 9113 §8.3.1).
+            # instead of a Host header (RFC 9113 §8.3.1).  Keep a user-provided
+            # Host header in place so the target/Host separation stays visible
+            # in the Raw editor and survives the Edit And Replay round-trip
+            # (apply_request_edits rebuilds :authority from it); only the Host
+            # header Request.make() derived from the URL is dropped.
             req.authority = explicit_host or hostport(req.scheme, req.host, req.port)
-            req.headers.pop("Host", None)
+            if not explicit_host:
+                req.headers.pop("Host", None)
         else:
             # A non-empty authority switches the request line to absolute-form
             # (RFC 9112 §3.2.2), but the target server expects origin-form.

@@ -89,6 +89,12 @@ class ReplayHandler(server.ConnectionHandler):
     def __init__(self, flow: http.HTTPFlow, options: Options) -> None:
         client = flow.client_conn.copy()
         client.state = ConnectionState.OPEN
+        # A replayed flow has no real client connection, hence no ALPN offers.
+        # For HTTP/2 flows, offer h2 (with an HTTP/1.1 fallback) so that the
+        # server connection negotiates the same protocol version as the flow;
+        # the TLS layer mirrors these offers upstream.
+        if flow.request.is_http2 and not client.alpn_offers:
+            client.alpn_offers = (b"h2", b"http/1.1")
 
         context = Context(client, options)
         context.server = Server(address=(flow.request.host, flow.request.port))

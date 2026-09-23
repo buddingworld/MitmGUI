@@ -666,11 +666,40 @@ class _AutoRulesAddon:
             # Never break proxying because of a save failure.
             pass
 
+    @staticmethod
+    def _materialize_h2_host_header(flow) -> None:
+        """Expose the HTTP/2/3 ``:authority`` as a regular Host header.
+
+        HTTP/2/3 requests carry the host in the ``:authority`` pseudo-header
+        and have no Host header in ``request.headers``, so Auto Rules cannot
+        match or replace the host like they can on HTTP/1.x. Injecting a
+        ``Host`` header (mirroring ``:authority``) before rule processing
+        makes both work unchanged. The h2/h3 writer lifts an explicit Host
+        header back over ``:authority`` on the wire and strips it from the
+        emitted header list (RFC 9113 §8.3.1), so the injected header never
+        reaches the wire as a duplicate.
+        """
+        req = getattr(flow, "request", None)
+        if req is None or not (req.is_http2 or req.is_http3):
+            return
+        if req.first_line_format == "authority":  # CONNECT has no :scheme/:path
+            return
+        if "host" in req.headers:
+            return
+        try:
+            authority = req.authority
+        except Exception:
+            return
+        if authority:
+            req.headers.insert(0, "Host", authority)
+
     def request(self, flow) -> None:
         from mitmproxy import http
         if not isinstance(flow, http.HTTPFlow):
             return
         self._refresh_rules_if_changed()
+        # Make the h2/h3 :authority visible and replaceable as a Host header.
+        self._materialize_h2_host_header(flow)
         # Response With / Response With File: return the configured payload
         # without contacting the web server.
         self._apply_response_with(flow)
