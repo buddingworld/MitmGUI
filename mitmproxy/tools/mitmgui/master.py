@@ -19,6 +19,54 @@ from mitmproxy.tools.mitmgui.plugins_manager import _PluginsAddon
 logger = logging.getLogger(__name__)
 
 
+def glob_match(value: str, pattern: str, case_sensitive: bool) -> bool:
+    """Match ``value`` against ``pattern`` supporting ``*`` / ``?`` wildcards
+    (e.g. ``*.baidu.com``, ``*.baidu*.com``).  A pattern without wildcards
+    behaves exactly like an equality test, so existing exact rules keep
+    working unchanged."""
+    import fnmatch
+
+    if case_sensitive:
+        return fnmatch.fnmatchcase(value, pattern)
+    return fnmatch.fnmatchcase(value.lower(), pattern.lower())
+
+
+def match_filter_rule(flow, rule: dict) -> bool:
+    """Check whether a flow matches a GUI filter rule.
+
+    Shared by the session list (``MitmGuiMainWindow._match_filter_rule``) and
+    the BreakPoint addon so both sides behave identically.
+
+    ``hostname`` matches either the request target (``request.host``, i.e. the
+    absolute-form request-line authority or the proxy-mode target) or the Host
+    header (``request.pretty_host``).  The two differ for a request like
+    ``GET https://1.2.3.4/ HTTP/1.1`` with ``Host: example.com``, so matching
+    both keeps ``hostname: example.com`` working there while still allowing a
+    filter by target IP.
+
+    ``path`` ignores a leading slash and matches either the full path
+    (including the query string) or the bare path, so ``news`` and
+    ``news?id=1`` both match a request to ``/news?id=1``.
+    """
+    request = getattr(flow, "request", None)
+    if request is None:
+        return False
+
+    rule_type = rule.get("type", "")
+    rule_value = rule.get("value", "")
+
+    if rule_type == "hostname":
+        return glob_match(request.host or "", rule_value, False) or glob_match(
+            request.pretty_host or "", rule_value, False
+        )
+    if rule_type == "path":
+        rule_value = rule_value.lstrip("/")
+        full = (request.path or "").lstrip("/")
+        bare = full.split("?", 1)[0]
+        return glob_match(full, rule_value, True) or glob_match(bare, rule_value, True)
+    return False
+
+
 class _ResponseIntercept:
     """Intercepts only the RESPONSE phase for specific flow IDs.
 
@@ -822,24 +870,10 @@ class _BreakpointRequestIntercept:
     def _matches_filter(self, flow) -> bool:
         """Return True if the flow matches any GUI filter rule.
 
-        Must match MitmGuiMainWindow._match_filter_rule() exactly.
+        Uses the same matcher as MitmGuiMainWindow so that filtered sessions
+        behave identically in the session list and in BreakPoint.
         """
-        if not flow.request:
-            return False
-        for rule in self.filter_rules:
-            rule_type = rule.get("type", "")
-            rule_value = rule.get("value", "")
-            if rule_type == "hostname":
-                if (flow.request.host or "") == rule_value:
-                    return True
-            elif rule_type == "path":
-                # Ignore a leading slash and optionally the query string.
-                rule_value = rule_value.lstrip("/")
-                full = (flow.request.path or "").lstrip("/")
-                bare = full.split("?", 1)[0]
-                if full == rule_value or bare == rule_value:
-                    return True
-        return False
+        return any(match_filter_rule(flow, rule) for rule in self.filter_rules)
 
     def request(self, flow) -> None:
         from mitmproxy import http

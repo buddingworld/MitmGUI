@@ -1,6 +1,5 @@
 import base64
 import ctypes
-import fnmatch
 import json as json_mod
 import math
 import os
@@ -75,7 +74,7 @@ from mitmproxy import http, options
 from mitmproxy.tools import cmdline
 from mitmproxy.tools.mitmgui import themes
 from mitmproxy.tools.mitmgui.config import AppConfig
-from mitmproxy.tools.mitmgui.master import MitmGuiMaster
+from mitmproxy.tools.mitmgui.master import MitmGuiMaster, match_filter_rule
 from mitmproxy.tools.mitmgui.mcp_server import MCP_URL, McpServer
 from mitmproxy.tools.mitmgui.session_list import SessionTableModel
 from mitmproxy.tools.mitmgui.websocket_window import WebSocketWindow
@@ -85,16 +84,6 @@ DEFAULT_ENCODING = "utf-8"
 
 # Themes with a dark chrome; the window frame adapts its colors accordingly
 _DARK_THEMES = {"android", "pyqt_dark"}
-
-
-def _glob_match(value: str, pattern: str, case_sensitive: bool) -> bool:
-    """Match ``value`` against ``pattern`` supporting ``*`` / ``?`` wildcards
-    (e.g. ``*.baidu.com``, ``*.baidu*.com``).  A pattern without wildcards
-    behaves exactly like an equality test, so existing exact rules keep
-    working unchanged."""
-    if case_sensitive:
-        return fnmatch.fnmatchcase(value, pattern)
-    return fnmatch.fnmatchcase(value.lower(), pattern.lower())
 
 
 def _make_icon(icon_type: str, bg_color: str, size: int = 64) -> QIcon:
@@ -6729,26 +6718,7 @@ class MitmGuiMainWindow(QMainWindow):
     @staticmethod
     def _match_filter_rule(flow, rule: dict) -> bool:
         """Check if a flow matches a filter rule."""
-        r = flow.request
-        if not r:
-            return False
-
-        rule_type = rule.get("type", "")
-        rule_value = rule.get("value", "")
-
-        if rule_type == "hostname":
-            return _glob_match((r.host or ""), rule_value, case_sensitive=False)
-        elif rule_type == "path":
-            # Ignore a leading slash and optionally the query string, so a
-            # rule value like "news?id=1" or plain "news" both match a flow
-            # whose request.path is "/news?id=1".
-            rule_value = rule_value.lstrip("/")
-            full = (r.path or "").lstrip("/")      # "news?id=1"
-            bare = full.split("?", 1)[0]           # "news"
-            return _glob_match(full, rule_value, True) or _glob_match(
-                bare, rule_value, True
-            )
-        return False
+        return match_filter_rule(flow, rule)
 
     def _filter_hostname(self) -> None:
         """Add a hostname filter and apply it."""
