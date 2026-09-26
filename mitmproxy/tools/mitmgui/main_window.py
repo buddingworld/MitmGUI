@@ -3057,6 +3057,16 @@ class FindDialog(QDialog):
         # into directly.  Kept in memory only (never written to disk) and
         # shared between dialog openings for the current application run.
         self._history_menu = QMenu(self)
+        # Style the popup as a plain option list (rows spanning the full
+        # width, no menu gutter or rounded frame) so it reads like a combo
+        # box drop-down rather than a free-floating menu.
+        self._history_menu.setStyleSheet(
+            "QMenu { padding: 0px; border: 1px solid palette(mid); }"
+            "QMenu::item { padding: 4px 8px; }"
+            "QMenu::item:selected {"
+            " background: palette(highlight); color: palette(highlighted-text); }"
+            "QMenu::separator { height: 1px; background: palette(mid); }"
+        )
         self._history_action = QAction(
             self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown),
             "Recent searches",
@@ -3066,16 +3076,6 @@ class FindDialog(QDialog):
         self._history_action.triggered.connect(self._show_history_menu)
         self._find_text.addAction(
             self._history_action, QLineEdit.ActionPosition.TrailingPosition
-        )
-        # Qt builds the embedded icon as an internal QToolButton; keep a
-        # handle on it so the list can be popped up under the icon.
-        self._history_btn = next(
-            (
-                b
-                for b in self._find_text.findChildren(QToolButton)
-                if b.defaultAction() is self._history_action
-            ),
-            None,
         )
         layout.addLayout(find_layout)
 
@@ -3135,15 +3135,18 @@ class FindDialog(QDialog):
     # ── Recent search history ──
 
     def _show_history_menu(self) -> None:
-        """Pop the recent-search list up under the icon inside the text box."""
-        anchor = self._history_btn or self._find_text
-        # Rebuild first: the actions determine the width used for alignment.
+        """Open the recent-search list flush under the text box.
+
+        The list is kept the same width as the text box and left-aligned with
+        it, so it reads like a combo box option list rather than a menu that
+        happens to be near the icon.
+        """
+        # Rebuild first: the entries determine the width the popup needs.
         self._rebuild_history_menu()
-        top = anchor.mapToGlobal(QPoint(0, anchor.height()))
-        # Right-align with the icon so a long search term does not push the
-        # list off the right-hand edge of the dialog.
-        x = top.x() + anchor.width() - self._history_menu.sizeHint().width()
-        self._history_menu.popup(QPoint(x, top.y()))
+        self._history_menu.setMinimumWidth(self._find_text.width())
+        self._history_menu.popup(
+            self._find_text.mapToGlobal(QPoint(0, self._find_text.height()))
+        )
 
     def _rebuild_history_menu(self) -> None:
         self._history_menu.clear()
