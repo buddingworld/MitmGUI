@@ -3018,6 +3018,12 @@ class FindDialog(QDialog):
         "Url Only",
     ]
 
+    # Recent search terms, most recent first.  Class-level so it outlives the
+    # dialog instance (the dialog closes after each search) while still being
+    # in memory only for the current application run.
+    MAX_HISTORY = 15
+    _history: list[str] = []
+
     HIGHLIGHT_COLORS: list[tuple[str, QColor | None]] = [
         ("\u65e0", None),           # None
         ("\u989c\u82721", QColor("#FF9999")),
@@ -3045,6 +3051,32 @@ class FindDialog(QDialog):
         self._find_text.setPlaceholderText("Text To Search For")
         self._find_text.textChanged.connect(self._on_text_changed)
         find_layout.addWidget(self._find_text)
+
+        # Recent search terms, for quick re-selection.  Shown as a combo-box
+        # style icon embedded in the text box, so the field can still be typed
+        # into directly.  Kept in memory only (never written to disk) and
+        # shared between dialog openings for the current application run.
+        self._history_menu = QMenu(self)
+        self._history_action = QAction(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown),
+            "Recent searches",
+            self._find_text,
+        )
+        self._history_action.setToolTip("Recent searches")
+        self._history_action.triggered.connect(self._show_history_menu)
+        self._find_text.addAction(
+            self._history_action, QLineEdit.ActionPosition.TrailingPosition
+        )
+        # Qt builds the embedded icon as an internal QToolButton; keep a
+        # handle on it so the list can be popped up under the icon.
+        self._history_btn = next(
+            (
+                b
+                for b in self._find_text.findChildren(QToolButton)
+                if b.defaultAction() is self._history_action
+            ),
+            None,
+        )
         layout.addLayout(find_layout)
 
         # ── Options group ──
@@ -3100,6 +3132,51 @@ class FindDialog(QDialog):
     def _on_text_changed(self, text: str) -> None:
         self._search_btn.setEnabled(bool(text.strip()))
 
+    # ── Recent search history ──
+
+    def _show_history_menu(self) -> None:
+        """Pop the recent-search list up under the icon inside the text box."""
+        anchor = self._history_btn or self._find_text
+        # Rebuild first: the actions determine the width used for alignment.
+        self._rebuild_history_menu()
+        top = anchor.mapToGlobal(QPoint(0, anchor.height()))
+        # Right-align with the icon so a long search term does not push the
+        # list off the right-hand edge of the dialog.
+        x = top.x() + anchor.width() - self._history_menu.sizeHint().width()
+        self._history_menu.popup(QPoint(x, top.y()))
+
+    def _rebuild_history_menu(self) -> None:
+        self._history_menu.clear()
+        if self._history:
+            for text in self._history:
+                # '&' would be read as a mnemonic marker in a menu entry.
+                act = self._history_menu.addAction(text.replace("&", "&&"))
+                act.triggered.connect(
+                    lambda _checked, t=text: self._apply_history_entry(t)
+                )
+        else:
+            empty = self._history_menu.addAction("（无记录）")
+            empty.setEnabled(False)
+        self._history_menu.addSeparator()
+        clear = self._history_menu.addAction("清除记录")
+        clear.setEnabled(bool(self._history))
+        clear.triggered.connect(self._clear_history)
+
+    def _apply_history_entry(self, text: str) -> None:
+        """Put a remembered search term back into the input box."""
+        self._find_text.setText(text)
+        self._find_text.setCursorPosition(len(text))
+        self._find_text.setFocus()
+
+    def _remember_search(self, text: str) -> None:
+        if text in self._history:
+            self._history.remove(text)
+        self._history.insert(0, text)
+        del self._history[self.MAX_HISTORY:]
+
+    def _clear_history(self) -> None:
+        self._history.clear()
+
     def _do_search(self) -> None:
         search_text = self._find_text.text().strip()
         if not search_text:
@@ -3126,6 +3203,8 @@ class FindDialog(QDialog):
                 return
         else:
             pattern = search_text.lower() if not match_case else search_text
+
+        self._remember_search(search_text)
 
         # Search flows
         matched_indices = []
@@ -5922,6 +6001,23 @@ class MitmGuiMainWindow(QMainWindow):
         for flow in self._get_selected_flows():
             self._session_model.set_flow_color(flow, color)
 
+    def _open_custom_color_picker(self) -> None:
+        """Mark > 自定义颜色...: open a non-blocking color picker (same
+        settings as the Ctrl + F find dialog's 自定义颜色 entry) and apply
+        the picked color to all selected flows."""
+        dlg = QColorDialog(self)
+        dlg.setWindowTitle("自定义颜色")
+        # Non-native dialog: supports non-modal use and keeps the
+        # "Pick Screen Color" eyedropper, which returns an RGB value.
+        dlg.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog, True)
+        dlg.setOption(QColorDialog.ColorDialogOption.ShowAlphaChannel, False)
+        dlg.setWindowModality(Qt.WindowModality.NonModal)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.colorSelected.connect(self._color_selected)
+        dlg.show()
+        # Keep a reference until the dialog closes.
+        self._custom_color_picker = dlg
+
     def _f12_toggle_proxy(self) -> None:
         """F12: toggle system proxy (same as clicking the Capture button)."""
         new_state = not self._proxy_toggle_action.isChecked()
@@ -6019,6 +6115,8 @@ class MitmGuiMainWindow(QMainWindow):
         for name, color in self._CTRL_COLORS_LIST:
             act = mark_menu.addAction(name)
             act.triggered.connect(lambda _checked, c=color: self._color_selected(c))
+        custom_color_action = mark_menu.addAction("自定义颜色...")
+        custom_color_action.triggered.connect(self._open_custom_color_picker)
 
         # ── Replay ──
         replay_menu = menu.addMenu("Replay")
@@ -6042,10 +6140,21 @@ class MitmGuiMainWindow(QMainWindow):
         props_action.triggered.connect(self._show_properties)
 
         # ── Filter ──
+        # The request target and the Host header are kept separate, so they can
+        # differ (e.g. an absolute-form request to an IP carrying a domain Host
+        # header).  Offer both values in that case, otherwise just one.
         filter_menu = menu.addMenu("Filter")
-        host_label = flows[0].request.host if flows and flows[0].request and flows[0].request.host else "hostname"
-        filter_host = filter_menu.addAction(f"Filter {host_label}")
-        filter_host.triggered.connect(self._filter_hostname)
+        request = flows[0].request if flows else None
+        target_host = request.host if request and request.host else ""
+        header_host = request.pretty_host if request else ""
+        if header_host and header_host != target_host:
+            filter_header_host = filter_menu.addAction(f"Filter {header_host}")
+            filter_header_host.triggered.connect(self._filter_pretty_hostname)
+            filter_target = filter_menu.addAction(f"Filter {target_host}")
+            filter_target.triggered.connect(self._filter_hostname)
+        else:
+            filter_host = filter_menu.addAction(f"Filter {target_host or 'hostname'}")
+            filter_host.triggered.connect(self._filter_hostname)
         path_label = flows[0].request.path.lstrip("/") if flows and flows[0].request and flows[0].request.path else "url"
         filter_url = filter_menu.addAction(f"Filter {path_label}")
         filter_url.triggered.connect(self._filter_url)
@@ -6726,6 +6835,16 @@ class MitmGuiMainWindow(QMainWindow):
         if not flows or not flows[0].request or not flows[0].request.host:
             return
         hostname = flows[0].request.host
+        self._add_filter_rule("hostname", hostname)
+
+    def _filter_pretty_hostname(self) -> None:
+        """Add a hostname filter for the Host header (request.pretty_host)."""
+        flows = self._get_selected_flows()
+        if not flows or not flows[0].request:
+            return
+        hostname = flows[0].request.pretty_host
+        if not hostname:
+            return
         self._add_filter_rule("hostname", hostname)
 
     def _filter_url(self) -> None:
