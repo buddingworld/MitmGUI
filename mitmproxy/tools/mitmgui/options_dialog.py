@@ -485,6 +485,33 @@ class OptionsDialog(QDialog):
         self._listen_port_edit.textChanged.connect(lambda: setattr(self, "_modified", True))
         layout.addRow("Listen Port:", self._listen_port_edit)
 
+        http_versions = QGroupBox("Http Versions")
+        hv_layout = QVBoxLayout(http_versions)
+        hv_layout.setSpacing(4)
+
+        self._http11_cb = QCheckBox("HTTP/1.1")
+        self._http11_cb.setChecked(True)
+        # HTTP/1.1 is always supported; show it checked but not editable.
+        self._http11_cb.setEnabled(False)
+        self._http11_cb.setToolTip("HTTP/1.1 is always supported.")
+        hv_layout.addWidget(self._http11_cb)
+
+        self._http2_cb = QCheckBox("HTTP/2.0")
+        self._http2_cb.setToolTip(
+            "Advertise and accept HTTP/2 when negotiating with clients and servers."
+        )
+        self._http2_cb.setChecked(self._config.http2_enabled)
+        hv_layout.addWidget(self._http2_cb)
+
+        self._http3_cb = QCheckBox("HTTP/3.0")
+        self._http3_cb.setToolTip(
+            "Advertise and accept HTTP/3 (QUIC) when negotiating with clients and servers."
+        )
+        self._http3_cb.setChecked(self._config.http3_enabled)
+        hv_layout.addWidget(self._http3_cb)
+
+        layout.addRow(http_versions)
+
         layout.addItem(None)
         return w
 
@@ -695,6 +722,8 @@ class OptionsDialog(QDialog):
         self._config.ssl_insecure = self._ssl_insecure_cb.isChecked()
         self._config.session_list_font_size = self._session_font_spin.value()
         self._config.mcp_enabled = self._mcp_checkbox.isChecked()
+        self._config.http2_enabled = self._http2_cb.isChecked()
+        self._config.http3_enabled = self._http3_cb.isChecked()
 
         # SendTo: filter empty rows (name or address blank = empty)
         sendto_entries = []

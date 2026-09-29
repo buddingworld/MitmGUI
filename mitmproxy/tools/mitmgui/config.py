@@ -43,6 +43,8 @@ class AppConfig:
             "raw_word_wrap": True,  # Word Wrap for Raw editors (on by default)
             "session_list_font_size": 15,
             "mcp_enabled": False,  # MCP server listening on 127.0.0.1:7290
+            "http2_enabled": True,  # advertise/accept HTTP/2
+            "http3_enabled": True,  # advertise/accept HTTP/3 (QUIC)
         },
         "sendto": [
             {"name": "Fiddler", "address": "http://127.0.0.1:8888"},
@@ -226,6 +228,22 @@ class AppConfig:
     def mcp_enabled(self, val: bool) -> None:
         self._data["settings"]["mcp_enabled"] = bool(val)
 
+    @property
+    def http2_enabled(self) -> bool:
+        return bool(self._data["settings"].get("http2_enabled", True))
+
+    @http2_enabled.setter
+    def http2_enabled(self, val: bool) -> None:
+        self._data["settings"]["http2_enabled"] = bool(val)
+
+    @property
+    def http3_enabled(self) -> bool:
+        return bool(self._data["settings"].get("http3_enabled", True))
+
+    @http3_enabled.setter
+    def http3_enabled(self, val: bool) -> None:
+        self._data["settings"]["http3_enabled"] = bool(val)
+
     # ── SendTo ──
 
     @property
@@ -280,3 +298,13 @@ class AppConfig:
         # ssl_insecure: always apply (not in changes dict since it doesn't require restart)
         if self.ssl_insecure != opts.ssl_insecure:
             opts.update(ssl_insecure=self.ssl_insecure)
+
+        # Http Versions: consulted per connection, so no listener restart is
+        # needed.  HTTP/1.1 is always available and has no switch.
+        for name, enabled in (
+            ("http2", self.http2_enabled),
+            ("http3", self.http3_enabled),
+        ):
+            if getattr(opts, name) != enabled:
+                opts.update(**{name: enabled})
+

@@ -4845,6 +4845,9 @@ class MitmGuiMainWindow(QMainWindow):
         # QScintilla editors draw their own colours, so refresh them too.
         for w in self.findChildren(_ScintillaTextEdit):
             w.apply_theme(theme_id)
+        # The themed QSS sets a global font size which wins over the widget
+        # font, so re-assert the Session List Font Size after applying it.
+        self._apply_session_list_font_size()
         self._config.theme = theme_id
         self._config.save()
         self._apply_title_bar_theme(theme_id)
@@ -7128,8 +7131,31 @@ class MitmGuiMainWindow(QMainWindow):
 
     def _on_options_finished(self, dlg, result: int) -> None:
         self._apply_session_list_font_size()
+        if result == QDialog.DialogCode.Accepted:
+            # Http Versions are consulted per connection, so apply them right
+            # away instead of waiting for the next listener restart.
+            self._apply_http_versions()
         if result == QDialog.DialogCode.Accepted and dlg.was_modified:
             self._restart_proxy()
+
+    def _apply_http_versions(self) -> None:
+        """Push the Http Versions settings to the running proxy options.
+
+        ``http2`` / ``http3`` are read when a connection negotiates its
+        protocol, so new connections pick up the change without restarting
+        the listeners.
+        """
+        opts = self._master.options
+        updates = {}
+        if opts.http2 != self._config.http2_enabled:
+            updates["http2"] = self._config.http2_enabled
+        if opts.http3 != self._config.http3_enabled:
+            updates["http3"] = self._config.http3_enabled
+        if updates:
+            try:
+                opts.update(**updates)
+            except Exception as e:  # pragma: no cover - defensive
+                QMessageBox.warning(self, "Proxy Configuration Error", str(e))
 
     def _restart_proxy(self) -> None:
         """Apply updated config and restart the proxy listener on the new port."""
