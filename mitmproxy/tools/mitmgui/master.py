@@ -183,7 +183,7 @@ class _AutoRulesAddon:
           "match_type": "String" | "Regex",
           "match_value": "...",                            # match condition
           "action": "Color" | "Response With" | "Response With File"
-                    | "SaveToFile" | "Replace",
+                    | "SaveToFile" | "Replace" | "Add",
           "value": ...                                     # action payload
         }
     - ``Color`` is applied by the GUI (session list), not by this addon.
@@ -214,6 +214,13 @@ class _AutoRulesAddon:
       For ``Request.Headers`` / ``Response.Headers`` the ``source`` is matched
       against the whole ``name: value`` header line, e.g. replacing
       ``cookie: 123`` with ``cookie1: 234``.
+    - ``Add`` adds a header when it is not already present, so the header only
+      ever gains the pair — an existing one is left untouched.
+        value = {
+          "in": "Request.Headers" | "Response.Headers",
+          "key": "...",
+          "value": "..."
+        }
     """
 
     AUTO_FILE = os.path.join(os.getcwd(), "autos.json")
@@ -531,6 +538,66 @@ class _AutoRulesAddon:
             if self._match_rule(rule, text):
                 self._apply_replace_rule(flow, rule, message)
 
+    @staticmethod
+    def _apply_add_to_headers(headers, key: str, value: str) -> bool:
+        """Add ``key: value`` to ``headers``, unless ``key`` is already there.
+
+        Returns True if the header was added. The key is looked up
+        case-insensitively (headers are case-insensitive per RFC 9110 §5.1) and
+        an existing header — whatever its value — is never overwritten.
+        """
+        if not key:
+            return False
+        try:
+            if key in headers:
+                return False
+        except (ValueError, TypeError):
+            return False
+        try:
+            headers.add(key, value)
+        except (ValueError, TypeError):
+            return False
+        return True
+
+    def _apply_add_rule(self, flow, rule: dict) -> bool:
+        """Apply one Add rule. Returns True if the header was added."""
+        value = rule.get("value")
+        if not isinstance(value, dict):
+            return False
+        add_in = value.get("in", "Request.Headers")
+        key = value.get("key", "")
+        new_value = value.get("value", "")
+        if not key:
+            return False
+        if add_in == "Request.Headers":
+            return bool(flow.request) and self._apply_add_to_headers(
+                flow.request.headers, key, new_value
+            )
+        if add_in == "Response.Headers":
+            return bool(flow.response) and self._apply_add_to_headers(
+                flow.response.headers, key, new_value
+            )
+        return False
+
+    def _apply_add_matching(self, flow, target_ins: set[str]) -> None:
+        """Apply every enabled Add rule whose target is in ``target_ins``.
+
+        The match condition (``item``/``match_type``/``match_value``) is
+        evaluated independently of the add target (``value.in``), mirroring
+        ``_apply_replace_matching``.
+        """
+        for rule in self._rules:
+            if not rule.get("enabled", True):
+                continue
+            if rule.get("action") != "Add":
+                continue
+            add_in = _AutoRulesAddon._replace_rule_in(rule.get("value"))
+            if add_in not in target_ins:
+                continue
+            text = self._target_text(flow, rule.get("item", ""))
+            if self._match_rule(rule, text):
+                self._apply_add_rule(flow, rule)
+
     def _apply_response_with(self, flow) -> None:
         """Answer the first matching Response With / Response With File rule
         directly with the configured payload, without contacting the web
@@ -774,6 +841,8 @@ class _AutoRulesAddon:
                     else:
                         self._save_pending[str(getattr(flow, "id", ""))] = value
                 break
+        # Add rules targeting the request headers
+        self._apply_add_matching(flow, {"Request.Headers"})
         # Replace rules targeting the request side (URL / Request.*)
         self._apply_replace_matching(flow, {"URL", "Request.Headers", "Request.Body"})
 
@@ -813,6 +882,8 @@ class _AutoRulesAddon:
                     break
         if save_dir and flow.response is not None:
             self._save_flow_to_file(flow, save_dir)
+        # Add rules targeting the response headers
+        self._apply_add_matching(flow, {"Response.Headers"})
         # Replace rules targeting the response side (Response.Headers/Body);
         # the match item may live on either side of the flow.
         self._apply_replace_matching(

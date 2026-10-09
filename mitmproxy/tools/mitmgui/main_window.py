@@ -1647,6 +1647,12 @@ class InspectorPanel(QWidget):
                     if i == 1:
                         req.headers.clear()
                     req.headers.add(k, v)
+                # Remember whether the user actually typed a Content-Length.
+                # Assigning req.content below makes Message.set_content() write
+                # one unconditionally (a body-less GET would gain
+                # "Content-Length: 0"), so an auto-added header is removed again
+                # at the end — a user-typed one is kept and just adjusted.
+                had_content_length = "content-length" in req.headers
 
                 # Keep authority/Host aligned with the edited Raw headers. For
                 # hosts-remapped flows, the Raw request line shows the original
@@ -1688,6 +1694,13 @@ class InspectorPanel(QWidget):
                     req.content = body.encode(self._encoding, errors="replace")
                 else:
                     req.content = b""
+                # Drop the Content-Length that Message.set_content() synthesized
+                # for an empty body — GET packets edited in Raw must not grow a
+                # "Content-Length: 0" line the user never typed. raw_content is
+                # used instead of content because it cannot raise on a bad
+                # content-encoding.
+                if not req.raw_content and not had_content_length:
+                    req.headers.pop("content-length", None)
 
         # ── 2. Apply WebForms tab edits only when Raw was not edited. Raw is
         # the source of truth for Edit And Replay; otherwise stale WebForms data
@@ -2541,7 +2554,10 @@ class AutoRuleDialog(QDialog):
         "Response.Body",
     ]
     MATCH_TYPES = ["String", "Regex"]
-    ACTIONS = ["Color", "Response With", "Response With File", "SaveToFile", "Replace"]
+    ACTIONS = ["Color", "Response With", "Response With File", "SaveToFile", "Replace", "Add"]
+    #: Targets for the ``Add`` action — it appends a header, so only the two
+    #: header locations are selectable.
+    ADD_INS = ["Request.Headers", "Response.Headers"]
     REPLACE_INS = [
         "URL",
         "Request.Headers",
@@ -2656,6 +2672,19 @@ class AutoRuleDialog(QDialog):
         form.addRow("Destination", self._replace_dest_edit)
         self._replace_dest_row = form.rowCount() - 1
 
+        # "Add": a header the request/response gains when the rule matches. Only
+        # the header kind is added, never a replacement, so the row is "In".
+        self._add_in_cb = QComboBox()
+        self._add_in_cb.addItems(self.ADD_INS)
+        form.addRow("In", self._add_in_cb)
+        self._add_in_row = form.rowCount() - 1
+        self._add_key_edit = QLineEdit()
+        form.addRow("Key", self._add_key_edit)
+        self._add_key_row = form.rowCount() - 1
+        self._add_value_edit = QLineEdit()
+        form.addRow("Value", self._add_value_edit)
+        self._add_value_row = form.rowCount() - 1
+
         self._form = form
         layout.addLayout(form)
         # Keep the fields at the top of the dialog and the buttons at the
@@ -2685,6 +2714,12 @@ class AutoRuleDialog(QDialog):
                 v = rule.get("value")
                 if isinstance(v, str):
                     self._savedir_edit.setText(v)
+            elif action == "Add":
+                v = rule.get("value")
+                if isinstance(v, dict):
+                    self._add_in_cb.setCurrentText(v.get("in", "Request.Headers"))
+                    self._add_key_edit.setText(v.get("key", ""))
+                    self._add_value_edit.setText(v.get("value", ""))
             else:  # Replace
                 v = rule.get("value")
                 if isinstance(v, dict):
@@ -2714,6 +2749,7 @@ class AutoRuleDialog(QDialog):
         is_file = action == "Response With File"
         is_savedir = action == "SaveToFile"
         is_replace = action == "Replace"
+        is_add = action == "Add"
         self._form.setRowVisible(self._color_row, is_color)
         self._form.setRowVisible(self._resp_row, is_resp)
         self._form.setRowVisible(self._file_row, is_file)
@@ -2721,6 +2757,8 @@ class AutoRuleDialog(QDialog):
         for row in (self._replace_in_row, self._replace_type_row,
                     self._replace_source_row, self._replace_dest_row):
             self._form.setRowVisible(row, is_replace)
+        for row in (self._add_in_row, self._add_key_row, self._add_value_row):
+            self._form.setRowVisible(row, is_add)
         # While "Response With" is active let the value editor absorb the
         # extra vertical space; otherwise keep the fields compact at the top.
         self._spacer.changeSize(
@@ -2760,6 +2798,16 @@ class AutoRuleDialog(QDialog):
             value = self._file_path_edit.text().strip()
         elif action == "SaveToFile":
             value = self._savedir_edit.text().strip()
+        elif action == "Add":
+            key = self._add_key_edit.text().strip()
+            if not key:
+                QMessageBox.warning(self, "Validation", "Key field cannot be empty.")
+                return
+            value = {
+                "in": self._add_in_cb.currentText(),
+                "key": key,
+                "value": self._add_value_edit.text(),
+            }
         else:  # Replace
             source = self._replace_source_edit.text()
             if not source:
@@ -2924,6 +2972,11 @@ class AutoRulesDialog(QDialog):
             return (
                 f"{value.get('in', 'URL')}: {value.get('source', '')}"
                 f" \u2192 {value.get('destination', '')}"
+            )
+        if action == "Add" and isinstance(value, dict):
+            return (
+                f"{value.get('in', 'Request.Headers')}: "
+                f"{value.get('key', '')}: {value.get('value', '')}"
             )
         if isinstance(value, str):
             return value
@@ -6206,13 +6259,14 @@ class MitmGuiMainWindow(QMainWindow):
         flows = self._get_selected_flows()
         if not flows:
             return
-        parts = []
+        blocks = []
         for f in flows:
-            parts.append(_format_request_raw(f))
-            parts.append("")
-            parts.append(_format_response_raw(f))
-            parts.append("\n" + "=" * 60 + "\n")
-        QApplication.clipboard().setText("\n".join(parts))
+            blocks.append(
+                "\n".join((_format_request_raw(f), "", _format_response_raw(f)))
+            )
+        # The divider only goes *between* packets: a single copied session ends
+        # right after its response, with no trailing blank line or separator.
+        QApplication.clipboard().setText(("\n\n" + "=" * 60 + "\n\n").join(blocks))
 
     def _copy_request(self) -> None:
         flows = self._get_selected_flows()

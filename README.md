@@ -31,6 +31,9 @@ MitmGUI 是基于 mitmproxy 内核构建的桌面抓包、调试和流量改写�
 - Filter Rules：按 URL、Host、方法、状态码等条件过滤会话。
 - Breakpoint Rules：按规则拦截请求或响应，修改后再放行。
 - Auto Rules：自动执行颜色标记、响应替换、请求/响应内容替换。
+- Auto Rules 的 `Add` 动作在指定 `Request.Headers` / `Response.Headers` 中不存在该 `Key` 时补上 `Key: Value`，已存在时不覆盖。
+- 编辑 GET 形式的请求包时不再自动加入 `Content-Length: 0`；用户自己写的 `Content-Length` 仍会被保留。
+- 右键 Copy - Session 仅在多个数据包之间插入 `======` 分割线，不再在末尾追加空行和分割线。
 - URL Replace 保留显式 `Host` 头，不再因为修改 URL 自动覆盖 Header 中的 Host。
 - Hosts Remapping 支持连接目标重映射，并可保留原始 Host 头：
 
