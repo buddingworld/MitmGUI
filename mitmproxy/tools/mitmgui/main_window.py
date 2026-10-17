@@ -3180,19 +3180,27 @@ class FindDialog(QDialog):
         self._search_btn = QPushButton("\u786e\u8ba4\u641c\u7d22")
         self._search_btn.setEnabled(False)
         self._search_btn.clicked.connect(self._do_search)
-        # Step through the sessions matched by the last search.
-        self._prev_btn = QPushButton("⬅")
+        # Step through the sessions matched by the last search. Plain arrow
+        # glyphs, not chunky buttons: the theme already paints QToolButton
+        # borderless and transparent, so the local rule only dims the arrows
+        # while they are unusable.
+        arrow_style = "QToolButton:disabled { color: palette(mid); }"
+        self._prev_btn = QToolButton()
+        self._prev_btn.setText("←")
         self._prev_btn.setToolTip("Jump to the previous matching session")
         self._prev_btn.setEnabled(False)
+        self._prev_btn.setStyleSheet(arrow_style)
         self._prev_btn.clicked.connect(lambda: self._jump_match(-1))
         btn_layout.addWidget(self._prev_btn)
         # Right-click offers to select every matching session at once.
         self._search_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._search_btn.customContextMenuRequested.connect(self._show_search_menu)
         btn_layout.addWidget(self._search_btn)
-        self._next_btn = QPushButton("➡")
+        self._next_btn = QToolButton()
+        self._next_btn.setText("→")
         self._next_btn.setToolTip("Jump to the next matching session")
         self._next_btn.setEnabled(False)
+        self._next_btn.setStyleSheet(arrow_style)
         self._next_btn.clicked.connect(lambda: self._jump_match(1))
         btn_layout.addWidget(self._next_btn)
         self._cancel_btn = QPushButton("\u53d6\u6d88")
