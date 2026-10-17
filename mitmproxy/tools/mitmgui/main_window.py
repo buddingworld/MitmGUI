@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QThread, pyqtSignal, QObject, QByteArray, QSortFilterProxyModel, QRegularExpression
+from PyQt6.QtCore import QEvent, QItemSelection, QItemSelectionModel, QPoint, QPointF, QRect, QRectF, Qt, QTimer, QThread, pyqtSignal, QObject, QByteArray, QSortFilterProxyModel, QRegularExpression
 from PyQt6.QtGui import QAction, QActionGroup, QBrush, QColor, QCursor, QFont, QFontMetrics, QIcon, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPalette
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -2354,7 +2354,6 @@ class ShortcutKeysDialog(QDialog):
                 ("Ctrl+R", "Open Edit - Custom Rules (rules.py)"),
                 ("Ctrl+E", "Toggle auto-roll (auto-scroll on new sessions)"),
                 ("Ctrl+X", "Clear the session list"),
-                ("Ctrl+Q", "Exit mitmgui"),
                 ("Ctrl+0", "Reset the highlight color of the selected session(s)"),
                 (
                     "Ctrl+1 .. Ctrl+9",
@@ -3088,9 +3087,14 @@ class FindDialog(QDialog):
         ("\u989c\u82727", QColor("#99FFFF")),
     ]
 
-    def __init__(self, session_model, parent=None):
+    def __init__(self, session_model, main_window, parent=None):
         super().__init__(parent)
         self._session_model = session_model
+        self._main_window = main_window
+        # Flows matched by the last executed search, in session-list order, and
+        # the position ⬅ / ➡ currently sits on (-1 = not navigated yet).
+        self._matched_flows: list = []
+        self._match_pos: int = -1
         self.setWindowTitle("Find Sessions")
         self.setWindowIcon(_make_icon("proxy", "#1565C0"))
         self.setMinimumSize(460, 260)
@@ -3176,14 +3180,62 @@ class FindDialog(QDialog):
         self._search_btn = QPushButton("\u786e\u8ba4\u641c\u7d22")
         self._search_btn.setEnabled(False)
         self._search_btn.clicked.connect(self._do_search)
+        # Step through the sessions matched by the last search.
+        self._prev_btn = QPushButton("⬅")
+        self._prev_btn.setToolTip("Jump to the previous matching session")
+        self._prev_btn.setEnabled(False)
+        self._prev_btn.clicked.connect(lambda: self._jump_match(-1))
+        btn_layout.addWidget(self._prev_btn)
+        # Right-click offers to select every matching session at once.
+        self._search_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._search_btn.customContextMenuRequested.connect(self._show_search_menu)
         btn_layout.addWidget(self._search_btn)
+        self._next_btn = QPushButton("➡")
+        self._next_btn.setToolTip("Jump to the next matching session")
+        self._next_btn.setEnabled(False)
+        self._next_btn.clicked.connect(lambda: self._jump_match(1))
+        btn_layout.addWidget(self._next_btn)
         self._cancel_btn = QPushButton("\u53d6\u6d88")
         self._cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(self._cancel_btn)
         layout.addLayout(btn_layout)
 
+    def _show_search_menu(self, pos) -> None:
+        """Right-click menu on the search button: search and select all matches."""
+        menu = QMenu(self)
+        select_all = menu.addAction("搜索并选中")
+        select_all.setEnabled(self._search_btn.isEnabled())
+        select_all.triggered.connect(self._do_search_and_select)
+        menu.exec(self._search_btn.mapToGlobal(pos))
+
+    def _do_search_and_select(self) -> None:
+        """Run the search and select every matching session in the list."""
+        if self._do_search():
+            self._main_window._select_flows(self._matched_flows)
+
+    def _update_nav_buttons(self) -> None:
+        """⬅ / ➡ only make sense once a search has produced matches."""
+        has_matches = bool(self._matched_flows)
+        self._prev_btn.setEnabled(has_matches)
+        self._next_btn.setEnabled(has_matches)
+
+    def _jump_match(self, step: int) -> None:
+        """Select the previous/next matching session, wrapping around."""
+        if not self._matched_flows:
+            return
+        if self._match_pos < 0:
+            # Nothing navigated yet: ➡ starts at the first match, ⬅ at the last.
+            self._match_pos = 0 if step > 0 else len(self._matched_flows) - 1
+        else:
+            self._match_pos = (self._match_pos + step) % len(self._matched_flows)
+        self._main_window._select_flow(self._matched_flows[self._match_pos])
+
     def _on_text_changed(self, text: str) -> None:
         self._search_btn.setEnabled(bool(text.strip()))
+        # A changed query invalidates the previous result set.
+        self._matched_flows = []
+        self._match_pos = -1
+        self._update_nav_buttons()
 
     # ── Recent search history ──
 
@@ -3233,10 +3285,16 @@ class FindDialog(QDialog):
     def _clear_history(self) -> None:
         self._history.clear()
 
-    def _do_search(self) -> None:
+    def _do_search(self) -> bool:
+        """Run the search and remember its matches.
+
+        Returns True when the search produced a result set. The dialog is left
+        open either way so ⬅ / ➡ can step through the matches (and so a query
+        that found nothing can be adjusted without reopening the dialog).
+        """
         search_text = self._find_text.text().strip()
         if not search_text:
-            return
+            return False
 
         scope = self._scope_combo.currentIndex()
         match_case = self._match_case.isChecked()
@@ -3256,30 +3314,34 @@ class FindDialog(QDialog):
                 pattern = re.compile(search_text, flags)
             except re.error:
                 QMessageBox.warning(self, "Error", f"Invalid regular expression: {search_text}")
-                return
+                return False
         else:
             pattern = search_text.lower() if not match_case else search_text
 
         self._remember_search(search_text)
 
         # Search flows
-        matched_indices = []
-        for idx, f in enumerate(self._session_model._flows):
-            if self._flow_matches(f, scope, pattern, use_regex, match_case):
-                matched_indices.append(idx)
+        matched_flows = [
+            f for f in self._session_model._flows
+            if self._flow_matches(f, scope, pattern, use_regex, match_case)
+        ]
 
-        if not matched_indices:
+        # Every search replaces the previous result set. The flows are kept in
+        # session-list order so ⬅ / ➡ walk them in the order shown.
+        self._matched_flows = matched_flows
+        self._match_pos = -1
+        self._update_nav_buttons()
+
+        if not matched_flows:
             QMessageBox.information(self, "Result", "No matching sessions found.")
-            self.accept()
-            return
+            return False
 
         # Highlight matching flows
         if color is not None:
-            for idx in matched_indices:
-                f = self._session_model._flows[idx]
+            for f in matched_flows:
                 self._session_model.set_flow_color(f, color)
 
-        self.accept()
+        return True
 
     def _flow_matches(self, f, scope: int, pattern, use_regex: bool, match_case: bool) -> bool:
         """Check if a flow matches the search pattern."""
@@ -4730,7 +4792,6 @@ class MitmGuiMainWindow(QMainWindow):
         file_menu.addAction(load_sessions_action)
         file_menu.addSeparator()
         exit_action = QAction("E&xit", self)
-        exit_action.setShortcut(QKeySequence("Ctrl+Q"))
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
@@ -5324,6 +5385,38 @@ class MitmGuiMainWindow(QMainWindow):
         proxy_idx = self._sort_proxy.mapFromSource(self._session_model.index(row, 0))
         self._session_table.selectRow(proxy_idx.row())
         self._session_table.scrollTo(proxy_idx)
+
+    def _select_flows(self, flows) -> None:
+        """Select all given flows in the session table, replacing the selection."""
+        row_of = {id(f): i for i, f in enumerate(self._session_model._flows)}
+        rows = []
+        for flow in flows:
+            row = row_of.get(id(flow))
+            if row is None:
+                continue
+            proxy_idx = self._sort_proxy.mapFromSource(
+                self._session_model.index(row, 0)
+            )
+            if proxy_idx.isValid():
+                rows.append(proxy_idx)
+        if not rows:
+            return
+        # One QItemSelection for the whole set: selecting row by row would emit
+        # a selectionChanged signal per match, which is slow for large results.
+        selection = QItemSelection()
+        for proxy_idx in rows:
+            selection.select(proxy_idx, proxy_idx)
+        sel_model = self._session_table.selectionModel()
+        sel_model.clearSelection()
+        sel_model.select(
+            selection,
+            QItemSelectionModel.SelectionFlag.Select
+            | QItemSelectionModel.SelectionFlag.Rows,
+        )
+        # NoUpdate: setCurrentIndex() would otherwise apply ClearAndSelect and
+        # throw away the selection that was just built.
+        sel_model.setCurrentIndex(rows[0], QItemSelectionModel.SelectionFlag.NoUpdate)
+        self._session_table.scrollTo(rows[0])
 
     def _jump_session_row(self, row: int) -> None:
         """Select the session at the given (view-sorted) row, scrolling to it."""
@@ -7010,7 +7103,7 @@ class MitmGuiMainWindow(QMainWindow):
 
     def _open_find_dialog(self) -> None:
         """Open the Find Sessions search dialog (non-blocking)."""
-        dlg = FindDialog(self._session_model, self)
+        dlg = FindDialog(self._session_model, self, self)
         dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dlg.show()
 
