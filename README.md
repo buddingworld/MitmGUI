@@ -63,6 +63,7 @@ Tools 窗口提供常用调试工具：
 ### 配置与运行体验
 
 - Config 窗口集中管理 HTTPS、连接、系统代理、SendTo 和通用设置。
+- 会话列表字号只由 Config 中的 `Session List Font Size` 决定，不再受主题样式表字号影响（此前打开再关闭 Config 会让字号跳变）。
 - 支持系统代理一键切换，默认监听 `127.0.0.1:8080`。
 - Logs 窗口按 Plugin、Info、Error、Debug 分类展示运行日志。
 - `rules.py` 自定义脚本可热加载，适合实现一次性或高度定制的流量处理逻辑。

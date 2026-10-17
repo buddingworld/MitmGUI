@@ -4904,6 +4904,13 @@ class MitmGuiMainWindow(QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        # The theme stylesheet sets a global font-size that Qt applies when the
+        # window is first polished — i.e. after the font was set during
+        # construction — and a stylesheet font beats setFont(). Re-assert the
+        # Session List Font Size here so the list follows Settings from the
+        # start instead of showing the theme's size until something else
+        # re-applies it (which is why visiting Options used to change it).
+        self._apply_session_list_font_size()
         overlay = getattr(self, "_frame_overlay", None)
         if overlay is not None:
             overlay.raise_()
