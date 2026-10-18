@@ -9,9 +9,10 @@ connection (``Disconnect``) or dropping it from this list (``Remove``).
 import time
 
 from PyQt6.QtCore import QSize, Qt, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QPalette, QTextOption
 from PyQt6.QtWidgets import (
     QDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -417,6 +418,61 @@ class WebSocketWindow(QDialog):
         self._status.setText("Session removed from this list.")
 
 
+class _BubbleBody(QTextEdit):
+    """Read-only message body that wraps anywhere and sizes itself to its text.
+
+    A QLabel cannot do this: it only breaks lines at word boundaries, so a long
+    unbroken run (compact JSON, base64, a token) stays on a single line and is
+    clipped at the bubble's width — which is why messages without a "Show more"
+    link used to lose their tail. QTextEdit wraps inside words as well and
+    reports the wrapped height through its document.
+    """
+
+    def __init__(self, text: str, width: int, parent=None):
+        super().__init__(parent)
+        self._measure_width = width
+        self._clamp: int | None = None
+        self.setReadOnly(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.setFont(QFont("Consolas", 10))
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        # No scrollbars — the bubble grows to fit the text instead.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Let the bubble's own shaded background show through.
+        palette = self.palette()
+        palette.setColor(QPalette.ColorRole.Base, Qt.GlobalColor.transparent)
+        self.setPalette(palette)
+        self.viewport().setAutoFillBackground(False)
+        self.setStyleSheet("background: transparent; border: none;")
+        self.setMaximumWidth(width)
+        # One tab stop per message would be unusable in a long log.
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.document().setDocumentMargin(0)
+        self.setPlainText(text)
+        self._apply_height()
+
+    def text_height(self, width: int | None = None) -> int:
+        """Height the text needs when wrapped to ``width`` (default: the cap)."""
+        doc = self.document()
+        doc.setTextWidth(self._measure_width if width is None else width)
+        return int(doc.size().height())
+
+    def set_clamped(self, height: int | None) -> None:
+        """Collapse to ``height`` px, or pass None to fit the whole text."""
+        self._clamp = height
+        self._apply_height()
+
+    def _apply_height(self) -> None:
+        self.setFixedHeight(
+            self._clamp if self._clamp is not None else self.text_height() + 2
+        )
+
+
 class _MessageViewDialog(QDialog):
     """Chat-style log of one WebSocket session with two manual send boxes.
 
@@ -568,35 +624,26 @@ class _MessageViewDialog(QDialog):
         )
         column.addWidget(caption)
 
-        content = QLabel(body or "(empty)")
-        content.setTextFormat(Qt.TextFormat.PlainText)
-        content.setFont(QFont("Consolas", 10))
-        content.setWordWrap(True)
-        content.setMaximumWidth(self.MAX_BUBBLE_WIDTH - 20)
-        content.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-            | Qt.TextInteractionFlag.TextSelectableByKeyboard
-        )
-        content.setStyleSheet("background: transparent;")
+        content = _BubbleBody(body or "(empty)", self.MAX_BUBBLE_WIDTH - 20)
         column.addWidget(content)
 
         width = self.MAX_BUBBLE_WIDTH - 20
         preview_h = content.fontMetrics().lineSpacing() * self.PREVIEW_LINES
-        if content.heightForWidth(width) > preview_h + 2:
+        if content.text_height(width) > preview_h + 2:
             # Trim the preview until it fits PREVIEW_LINES lines (wide glyphs
             # such as CJK wrap differently than a plain char estimate), clamp
-            # the label height, and offer a tail link that restores the full
+            # the box height, and offer a tail link that restores the full
             # selectable text.
             char_w = content.fontMetrics().horizontalAdvance("0") or 1
             preview = body[: width // char_w * self.PREVIEW_LINES]
             while preview:
-                content.setText(preview.rstrip() + "…")
-                if content.heightForWidth(width) <= preview_h + 2:
+                content.setPlainText(preview.rstrip() + "…")
+                if content.text_height(width) <= preview_h + 2:
                     break
                 preview = preview[: len(preview) * 9 // 10]
             else:
-                content.setText("…")
-            content.setMaximumHeight(preview_h)
+                content.setPlainText("…")
+            content.set_clamped(preview_h)
             more = QLabel('<a href="#more">Show more</a>')
             more.setTextFormat(Qt.TextFormat.RichText)
             more.setTextInteractionFlags(
@@ -620,10 +667,10 @@ class _MessageViewDialog(QDialog):
             line.addStretch(1)
         self._bubbles.insertWidget(self._bubbles.count() - 1, row)
 
-    def _expand_bubble(self, message, content: QLabel, more: QLabel) -> None:
+    def _expand_bubble(self, message, content: "_BubbleBody", more: QLabel) -> None:
         """Replace a collapsed 3-line preview with the full message text."""
-        content.setText(_render(message.content, message.is_text) or "(empty)")
-        content.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX: undo the clamp
+        content.setPlainText(_render(message.content, message.is_text) or "(empty)")
+        content.set_clamped(None)  # fit the whole text again
         more.deleteLater()
 
     def _update_header(self) -> None:
