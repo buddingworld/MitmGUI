@@ -85,6 +85,17 @@ class _ResponseIntercept:
             self.intercept_ids.discard(fid)
 
 
+def _is_ip_address(host: str) -> bool:
+    """True when ``host`` is a literal IP address rather than a name."""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
 class _HostsRemappingAddon:
     """Remaps request targets based on a hosts.txt file.
 
@@ -146,8 +157,18 @@ class _HostsRemappingAddon:
         if not data.server.address:
             return
         mapped = self._map_target(*data.server.address)
-        if mapped is not None:
-            data.server.address = mapped
+        if mapped is None:
+            return
+        old_host = data.server.address[0]
+        new_host, new_port = mapped
+        data.server.address = mapped
+        # mitmproxy derived the TLS SNI from the address it was about to use, so
+        # a mapping to another hostname would greet that server with the old
+        # name and it would close the connection. Mapping to an IP keeps the
+        # original name, because there the name is what selects the virtual
+        # host - that is the plain hosts-file behaviour.
+        if new_host != old_host and not _is_ip_address(new_host):
+            data.server.sni = new_host
 
     def _remap_flow_request_target(self, flow) -> None:
         request = flow.request
