@@ -77,6 +77,7 @@ from mitmproxy.tools.mitmgui.config import AppConfig
 from mitmproxy.tools.mitmgui.master import MitmGuiMaster, match_filter_rule
 from mitmproxy.tools.mitmgui.mcp_server import MCP_URL, McpServer
 from mitmproxy.tools.mitmgui.session_list import SessionTableModel
+from mitmproxy.tools.mitmgui import text_convert
 from mitmproxy.tools.mitmgui.websocket_window import WebSocketWindow
 
 ENCODINGS = ["utf-8", "gbk", "latin-1"]
@@ -753,6 +754,9 @@ class _ScintillaTextEdit(QsciScintilla):
         # Optional callback(menu) letting a host view (e.g. the Base64 tool's
         # Plain Text editor) add its own Encoding submenu to the context menu.
         self._encoding_menu_hook = None
+        # Whether the context menu offers "Convert Selection". Opt-in: only the
+        # inspector's Raw / JSON / XML tabs enable it.
+        self._convert_menu_enabled = False
         self._persist_prefs = persist_prefs
         self.setReadOnly(True)
         self.setUtf8(True)
@@ -876,6 +880,9 @@ class _ScintillaTextEdit(QsciScintilla):
             self._inspector.add_encoding_menu(menu)
         if self._encoding_menu_hook is not None:
             self._encoding_menu_hook(menu)
+        if self._convert_menu_enabled:
+            menu.addSeparator()
+            self._add_convert_menu(menu)
         menu.addSeparator()
         wrap_action = menu.addAction("Word Wrap")
         wrap_action.setCheckable(True)
@@ -885,6 +892,57 @@ class _ScintillaTextEdit(QsciScintilla):
         paste_action.setEnabled(not self.isReadOnly())
         paste_action.triggered.connect(self._paste_from_file)
         menu.exec(event.globalPos())
+
+    def _add_convert_menu(self, menu: QMenu) -> None:
+        """Add the "Convert Selection" submenu to a context menu.
+
+        Converting needs something to work on, so the whole submenu is greyed
+        out while the editor has no selection.
+        """
+        submenu = menu.addMenu("Convert Selection")
+        submenu.setEnabled(self.hasSelectedText())
+        for group, entries in text_convert.MENU:
+            group_menu = submenu.addMenu(group)
+            for label, convert in entries:
+                action = group_menu.addAction(label)
+                action.triggered.connect(
+                    lambda _checked=False, c=convert: self._convert_selection(c)
+                )
+
+    def _convert_selection(self, convert) -> None:
+        """Convert the selected text with ``convert``.
+
+        An editable editor has its selection replaced in place; a read-only one
+        opens the result in a Converted Text window instead. A conversion that
+        fails reports why and changes nothing.
+        """
+        selected = self.selectedText()
+        if not selected:
+            return
+        try:
+            converted = convert(selected)
+        except Exception as exc:  # noqa: BLE001 - any failure is the user's to see
+            self._report_convert_failure(str(exc) or type(exc).__name__)
+            return
+        self._clear_convert_failure()
+        if self.isReadOnly():
+            dlg = ConvertedTextDialog(converted, self)
+            dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            dlg.show()
+        else:
+            self.replaceSelectedText(converted)
+
+    def _report_convert_failure(self, reason: str) -> None:
+        """Show why a conversion failed, under the panel that owns this editor."""
+        message = f"Convert Selection failed: {reason}"
+        if self._inspector is not None:
+            self._inspector.show_convert_failure(message)
+        else:
+            QMessageBox.warning(self, "Convert Selection", message)
+
+    def _clear_convert_failure(self) -> None:
+        if self._inspector is not None:
+            self._inspector.clear_convert_failure()
 
     def _toggle_word_wrap(self, checked: bool) -> None:
         self.setWrapMode(
@@ -1212,6 +1270,50 @@ class _NoWheelTabWidget(QTabWidget):
         self.setTabBar(_NoWheelTabBar(self))
 
 
+class ConvertedTextDialog(QDialog):
+    """Shows the result of converting a selection in a read-only editor.
+
+    The text is presented the way the Raw tab presents a message — wrapping,
+    with the same keyword search bar underneath — so it can be read and
+    searched before being copied out.
+    """
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self._text = text
+        self.setWindowTitle("Converted Text")
+        self.setWindowIcon(_make_icon("replace", "#E65100"))
+        self.resize(720, 460)
+
+        layout = QVBoxLayout(self)
+
+        buttons = QHBoxLayout()
+        self._copy_btn = QPushButton("Copy To Clipboard")
+        self._copy_btn.clicked.connect(self._copy)
+        buttons.addWidget(self._copy_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.reject)
+        buttons.addWidget(close_btn)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+
+        editor = _ScintillaTextEdit(wrap=True, persist_prefs=False)
+        editor.setPlainText(text)
+        container = QWidget()
+        box = QVBoxLayout(container)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(0)
+        box.addWidget(editor)
+        box.addWidget(_RawSearchBar(editor))
+        layout.addWidget(container, 1)
+
+    def _copy(self) -> None:
+        """Put the converted text on the clipboard, confirming on the button."""
+        QApplication.clipboard().setText(self._text)
+        self._copy_btn.setText("Copied")
+        QTimer.singleShot(1200, lambda: self._copy_btn.setText("Copy To Clipboard"))
+
+
 class InspectorPanel(QWidget):
     """A panel with tabs for inspecting request or response data."""
 
@@ -1262,6 +1364,7 @@ class InspectorPanel(QWidget):
             elif label == "Raw":
                 widget = _ScintillaTextEdit(self)
                 widget.setPlaceholderText(f"Select a session to view {label}")
+                widget._convert_menu_enabled = True
                 self._text_widgets[label] = widget
                 # Bottom search bar (keyword / Regex / Find / Count)
                 container = QWidget()
@@ -1276,10 +1379,20 @@ class InspectorPanel(QWidget):
                 # editor as Raw, including persisted zoom and Word Wrap.
                 widget = _ScintillaTextEdit(self)
                 widget.setPlaceholderText(f"Select a session to view {label}")
+                # "Convert Selection" is offered on the Raw / JSON / XML views.
+                widget._convert_menu_enabled = label in ("JSON", "XML")
                 self._tabs.addTab(widget, label)
                 self._text_widgets[label] = widget
 
         layout.addWidget(self._tabs)
+
+        # Why the last "Convert Selection" failed.  Hidden until there is
+        # something to report, so it costs no space in the normal case.
+        self._convert_failure = QLabel()
+        self._convert_failure.setWordWrap(True)
+        self._convert_failure.setStyleSheet("color: #C62828; padding: 2px 6px;")
+        self._convert_failure.setVisible(False)
+        layout.addWidget(self._convert_failure)
 
         # Connect tab change signal for WebView lazy-render and WebForms↔Raw sync
         self._tabs.currentChanged.connect(self._on_tab_changed)
@@ -1462,6 +1575,15 @@ class InspectorPanel(QWidget):
             w.setReadOnly(not editable)
         if self._webforms_widget:
             self._webforms_widget.set_editable(editable)
+
+    def show_convert_failure(self, message: str) -> None:
+        """Report why a "Convert Selection" action did nothing."""
+        self._convert_failure.setText(message)
+        self._convert_failure.setVisible(True)
+
+    def clear_convert_failure(self) -> None:
+        self._convert_failure.clear()
+        self._convert_failure.setVisible(False)
 
     def populate_request(self, flow) -> None:
         """Display the flow's request content in the text widgets.
@@ -4032,7 +4154,21 @@ class ToolsDialog(QDialog):
         tabs.addTab(self._build_base64_tab(), "Base64")
         tabs.addTab(self._build_url_tab(), "URL")
         tabs.addTab(self._build_hex_tab(), "Hex")
+        # Window pinning, at the right-hand end of the tool tab row.
+        self._always_on_top = QCheckBox("Always on Top")
+        self._always_on_top.setToolTip("Keep this window above all other windows")
+        self._always_on_top.toggled.connect(self._on_always_on_top)
+        tabs.setCornerWidget(self._always_on_top, Qt.Corner.TopRightCorner)
         layout.addWidget(tabs)
+
+    def _on_always_on_top(self, checked: bool) -> None:
+        """Pin or unpin the window.
+
+        Qt only applies a window-flag change once the window is shown again,
+        so re-show it here (the dialog is non-modal and already visible).
+        """
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, checked)
+        self.show()
 
     def _build_dns_tab(self) -> QWidget:
         page = QWidget()

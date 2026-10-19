@@ -16,6 +16,7 @@ MitmGUI 是基于 mitmproxy 内核构建的桌面抓包、调试和流量改写�
 - 支持 HTTPS 解密，使用 mitmproxy CA 证书体系。
 - 会话详情包含 Headers、Cookies、Query、WebForms、Raw、Preview、ImageView 等视图。
 - Raw 视图支持搜索和编码切换，便于检查原始请求与响应内容。
+- Raw / JSON / XML 视图支持右键 `Convert Selection`：URL、HTML、BASE64、BASE64 URL、Native 共 19 种转换。可编辑时直接替换选中文本，只读时弹出 `Converted Text` 窗口（带 `Copy To Clipboard` 与和 Raw 相同的搜索栏）；转换失败会在面板下方提示原因且不改动文本。
 - 支持会话保存、加载、清空和 URL 批量复制。
 
 ### 请求操作
@@ -59,6 +60,7 @@ Tools 窗口提供常用调试工具：
 - Native2String：支持 Unicode escape 与普通字符串互转。
 - Base64：支持 padding、逐行编码、严格解码和逐行解码。
 - URL：支持普通编码、完整字节编码、逐行处理，解码时兼容 `+` 转空格。
+- 窗口右上角有 `Always on Top` 勾选框（默认关闭），可让 Tools 窗口始终置顶。
 - WebSocket 会话窗口：消息按聊天气泡展示，超长内容折叠为 3 行并可展开；无法在词边界换行的长串（紧凑 JSON、base64、token）也会自动换行完整显示。
 
 ### 配置与运行体验
