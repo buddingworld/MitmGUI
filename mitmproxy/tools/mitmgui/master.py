@@ -172,6 +172,26 @@ class _HostsRemappingAddon:
         self._remap_flow_request_target(flow)
 
 
+def _header_line(name: bytes, value: bytes) -> str:
+    """One header rendered the way rules match and rewrite it.
+
+    Both sides must agree: a rule written against a header line
+    (``Host: a.com``) could never match the raw repr that ``str(headers)``
+    produces.
+    """
+    return (
+        f"{name.decode('utf-8', 'replace')}: {value.decode('utf-8', 'replace')}"
+    )
+
+
+def _headers_text(headers) -> str:
+    """All header lines, one ``name: value`` per line."""
+    try:
+        return "\n".join(_header_line(name, value) for name, value in headers.fields)
+    except Exception:
+        return ""
+
+
 class _AutoRulesAddon:
     """Applies Auto Rules (autos.json) to matching flows.
 
@@ -287,10 +307,7 @@ class _AutoRulesAddon:
         if item == "Request.Header":
             if not flow.request:
                 return ""
-            try:
-                return str(flow.request.headers)
-            except Exception:
-                return ""
+            return _headers_text(flow.request.headers)
         if item == "Request.Body":
             if not flow.request:
                 return ""
@@ -299,10 +316,7 @@ class _AutoRulesAddon:
         if item == "Response.Header":
             if not flow.response:
                 return ""
-            try:
-                return str(flow.response.headers)
-            except Exception:
-                return ""
+            return _headers_text(flow.response.headers)
         if item == "Response.Body":
             if not flow.response:
                 return ""
@@ -418,7 +432,9 @@ class _AutoRulesAddon:
         for name, value in headers.fields:
             s_name = name.decode("utf-8", "replace")
             s_value = value.decode("utf-8", "replace")
-            line = f"{s_name}: {s_value}"
+            # Same rendering the match side uses, so a rule that matches a
+            # header line rewrites exactly that line.
+            line = _header_line(name, value)
             new_line = _AutoRulesAddon._apply_replace_text(line, source, destination, rtype)
             new_name, _, new_value = new_line.partition(":")
             if new_value.startswith(" "):
