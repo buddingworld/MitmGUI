@@ -34,7 +34,6 @@ MitmGUI 是基于 mitmproxy 内核构建的桌面抓包、调试和流量改写�
 - Auto Rules：自动执行颜色标记、响应替换、请求/响应内容替换。
 - Auto Rules 的匹配位置（Item）中 `Request.Url` 是完整 URL（`https://host/path?query`），另有 `Request.Url.Path`（`/path`）和 `Request.Url.QueryString`（`query`）两个条目；Replace 的目标（In）里原来的 `URL` 已统一为 `Request.Url`，旧规则里的 `URL` 仍可正常读取。
 - Auto Rules 匹配 `Request.Header` / `Response.Header` 时，文本按 `name: value` 逐行给出（如 `Host: a.com`），与 Replace 在 Headers 上的匹配格式一致，可直接写整行。
-- Auto Rules 按列表顺序从上到下执行，**每条规则的匹配对象是"前面规则改写之后"的请求**（链式，Up/Down 顺序有意义）。因此一条改写 `Host` 头的规则会让后面匹配 `Host: a.com` 的规则失效——只读的匹配规则应放在会改写请求的规则之前。
 - Auto Rules 的 `Add` 动作在指定 `Request.Headers` / `Response.Headers` 中不存在该 `Key` 时补上 `Key: Value`，已存在时不覆盖。
 - 编辑 GET 形式的请求包时不再自动加入 `Content-Length: 0`；用户自己写的 `Content-Length` 仍会被保留。
 - 右键 Copy - Session 仅在多个数据包之间插入 `======` 分割线，不再在末尾追加空行和分割线。
