@@ -940,11 +940,11 @@ class _ScintillaTextEdit(QsciScintilla):
         opens the result in a Converted Text window instead. A conversion that
         fails reports why and changes nothing.
         """
-        selected = self.selectedText()
+        selected = self.selected_bytes()
         if not selected:
             return
         try:
-            converted = convert(selected)
+            converted = convert(selected.decode("utf-8", errors="replace"))
         except Exception as exc:  # noqa: BLE001 - any failure is the user's to see
             self._report_convert_failure(str(exc) or type(exc).__name__)
             return
@@ -954,11 +954,14 @@ class _ScintillaTextEdit(QsciScintilla):
             dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             dlg.show()
         else:
-            # Decoders hand back bytes; the editor holds text, so decode them
-            # (the Converted Text window is where another charset can be tried).
-            if isinstance(converted, bytes):
-                converted = converted.decode(DEFAULT_ENCODING, errors="replace")
-            self.replaceSelectedText(converted)
+            # Decoders hand back bytes; keep them as bytes so the replacement
+            # stays byte-exact (a NUL must survive).
+            payload = (
+                converted
+                if isinstance(converted, bytes)
+                else converted.encode("utf-8", errors="replace")
+            )
+            self.replace_selection(payload)
 
     def _report_convert_failure(self, reason: str) -> None:
         """Show why a conversion failed, under the panel that owns this editor."""
@@ -982,10 +985,39 @@ class _ScintillaTextEdit(QsciScintilla):
         config.raw_word_wrap = checked
         config.save()
 
+    def selected_bytes(self) -> bytes:
+        """The selected text as raw UTF-8 bytes, NULs included.
+
+        QScintilla's ``selectedText()`` is deliberately avoided: it turns a NUL
+        into a space, so a selection holding 0x00 would silently change. The
+        whole document is read length-aware instead and sliced at the Scintilla
+        byte offsets (Scintilla positions are byte offsets in UTF-8 mode).
+        """
+        start = self.SendScintilla(QsciScintillaBase.SCI_GETSELECTIONSTART)
+        end = self.SendScintilla(QsciScintillaBase.SCI_GETSELECTIONEND)
+        if end <= start:
+            return b""
+        return self.text().encode("utf-8", errors="replace")[start:end]
+
+    def replace_selection(self, payload: bytes) -> None:
+        """Replace the selection with ``payload`` (raw UTF-8 bytes).
+
+        Uses Scintilla commands rather than QScintilla's string helpers, which
+        stop at a NUL and would drop everything after it.
+        """
+        start = self.SendScintilla(QsciScintillaBase.SCI_GETSELECTIONSTART)
+        end = self.SendScintilla(QsciScintillaBase.SCI_GETSELECTIONEND)
+        self.SendScintilla(QsciScintillaBase.SCI_BEGINUNDOACTION)
+        if end > start:
+            self.SendScintilla(QsciScintillaBase.SCI_DELETERANGE, start, end - start)
+        self.SendScintilla(QsciScintillaBase.SCI_GOTOPOS, start)
+        self.SendScintilla(QsciScintillaBase.SCI_ADDTEXT, len(payload), payload)
+        self.SendScintilla(QsciScintillaBase.SCI_ENDUNDOACTION)
+
     def _copy_to_file(self) -> None:
         """Save the selected text to a file the user picks."""
-        text = self.selectedText()
-        if not text:
+        data = self.selected_bytes()
+        if not data:
             return
         path, _ = QFileDialog.getSaveFileName(
             self, "Copy Selection To File", "selection.txt", "All Files (*)"
@@ -993,8 +1025,10 @@ class _ScintillaTextEdit(QsciScintilla):
         if not path:
             return
         try:
-            with open(path, "w", encoding="utf-8", newline="") as f:
-                f.write(text)
+            # Written as bytes so the file holds exactly what was selected,
+            # NULs and all.
+            with open(path, "wb") as f:
+                f.write(data)
         except OSError as exc:
             QMessageBox.warning(
                 self, "Copy To File", f"Could not write {path}:\n{exc}"
@@ -1019,22 +1053,7 @@ class _ScintillaTextEdit(QsciScintilla):
             else DEFAULT_ENCODING
         )
         text = _decode_bytes(data, encoding)
-        # Use length-aware Scintilla commands instead of the Qt string
-        # helpers: the latter treat NUL as a C-string terminator.  Scintilla
-        # positions are byte offsets when UTF-8 mode is enabled.
-        payload = text.encode("utf-8")
-        start = self.SendScintilla(QsciScintillaBase.SCI_GETSELECTIONSTART)
-        end = self.SendScintilla(QsciScintillaBase.SCI_GETSELECTIONEND)
-        self.SendScintilla(QsciScintillaBase.SCI_BEGINUNDOACTION)
-        if end > start:
-            self.SendScintilla(
-                QsciScintillaBase.SCI_DELETERANGE, start, end - start
-            )
-        self.SendScintilla(QsciScintillaBase.SCI_GOTOPOS, start)
-        self.SendScintilla(
-            QsciScintillaBase.SCI_ADDTEXT, len(payload), payload
-        )
-        self.SendScintilla(QsciScintillaBase.SCI_ENDUNDOACTION)
+        self.replace_selection(text.encode("utf-8"))
 
     def _save_zoom(self) -> None:
         if not self._persist_prefs:
@@ -1388,6 +1407,13 @@ class ConvertedTextDialog(QDialog):
         buttons.addStretch()
         layout.addLayout(buttons)
 
+        # Explains why a copy of text holding a NUL comes out short.
+        self._status = QLabel()
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet("color: #C62828; padding: 2px 4px;")
+        self._status.setVisible(False)
+        layout.addWidget(self._status)
+
         self._editor = _ScintillaTextEdit(wrap=True, persist_prefs=False)
         self._editor._encoding_menu_hook = self._add_encoding_menu
         container = QWidget()
@@ -1422,6 +1448,18 @@ class ConvertedTextDialog(QDialog):
         QApplication.clipboard().setText(self._text)
         self._copy_btn.setText("Copied")
         QTimer.singleShot(1200, lambda: self._copy_btn.setText("Copy To Clipboard"))
+        # The system text clipboard is NUL-terminated, so anything after an
+        # embedded NUL never reaches another application. Say so rather than
+        # letting the paste come out mysteriously short.
+        if "\x00" in self._text:
+            self._status.setText(
+                "This text contains a NUL (0x00). The system clipboard stops "
+                "there, so only the part before it can be pasted. Use "
+                "Copy To File (right-click the text) for the whole content."
+            )
+            self._status.setVisible(True)
+        else:
+            self._status.setVisible(False)
 
 
 class InspectorPanel(QWidget):
