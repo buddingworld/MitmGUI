@@ -419,18 +419,17 @@ class WebSocketWindow(QDialog):
 
 
 class _BubbleBody(QTextEdit):
-    """Read-only message body that wraps anywhere and sizes itself to its text.
+    """Read-only message body that wraps anywhere and fits its text.
 
-    A QLabel cannot do this: it only breaks lines at word boundaries, so a long
-    unbroken run (compact JSON, base64, a token) stays on a single line and is
-    clipped at the bubble's width — which is why messages without a "Show more"
-    link used to lose their tail. QTextEdit wraps inside words as well and
-    reports the wrapped height through its document.
+    A QLabel cannot wrap inside a long unbroken run (compact JSON, base64, a
+    token), so those messages were clipped. QTextEdit wraps anywhere; on top of
+    that the height is matched to the width the layout *actually* gives it —
+    measuring at one width and rendering at another is what cut messages short.
     """
 
-    def __init__(self, text: str, width: int, parent=None):
+    def __init__(self, text: str, cap: int, parent=None):
         super().__init__(parent)
-        self._clamp: int | None = None
+        self._cap = cap
         self.setReadOnly(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
@@ -448,47 +447,44 @@ class _BubbleBody(QTextEdit):
         self.setPalette(palette)
         self.viewport().setAutoFillBackground(False)
         self.setStyleSheet("background: transparent; border: none;")
-        self.setMaximumWidth(width)
+        # Never wider than the cap, but free to shrink to whatever fits.
+        self.setMaximumWidth(cap)
         # One tab stop per message would be unusable in a long log.
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.document().setDocumentMargin(0)
         self.setPlainText(text)
-        # Pin the width to what the text needs (up to the cap) before measuring
-        # the height. Left to the layout, a QTextEdit reports its default 256px
-        # hint, so the text wrapped far narrower than the height was measured
-        # for and the tail of every long message was cut off.
-        self._measure_width = self._fit_width(width)
-        self.setFixedWidth(self._measure_width)
-        self._apply_height()
+        self.setFixedHeight(self.text_height(cap))
 
-    def _fit_width(self, cap: int) -> int:
-        """The width to lay this text out at: its widest line, up to ``cap``."""
-        metrics = self.fontMetrics()
-        widest = max(
-            (metrics.horizontalAdvance(line) for line in self.toPlainText().split("\n")),
-            default=0,
-        )
-        # +2 keeps the last glyph off the wrap boundary.
-        return max(1, min(cap, widest + 2))
+    def sizeHint(self) -> QSize:
+        """Ask for the widest a bubble may get.
 
-    def text_height(self, width: int | None = None) -> int:
-        """Height the text needs when wrapped to ``width`` (default: its own)."""
+        QTextEdit's own hint is a fixed 256px whatever the text is, which would
+        keep every bubble that narrow. Asking for the cap lets the layout hand
+        over as much width as is actually available.
+        """
+        return QSize(self._cap, self.height())
+
+    def text_height(self, width: int) -> int:
+        """Height this text needs when wrapped to ``width``."""
         doc = self.document()
         previous = doc.textWidth()
-        doc.setTextWidth(self._measure_width if width is None else width)
-        height = int(doc.size().height())
+        doc.setTextWidth(max(int(width), 1))
+        height = int(doc.size().height()) + 2
         doc.setTextWidth(previous)  # measuring must not change how it renders
         return height
 
-    def set_clamped(self, height: int | None) -> None:
-        """Collapse to ``height`` px, or pass None to fit the whole text."""
-        self._clamp = height
-        self._apply_height()
+    def fit_height(self) -> None:
+        """Match the height to the width the layout actually gave this body."""
+        width = self.viewport().width()
+        if width < 10:  # not laid out yet
+            return
+        needed = self.text_height(width)
+        if needed != self.height():
+            self.setFixedHeight(needed)
 
-    def _apply_height(self) -> None:
-        self.setFixedHeight(
-            self._clamp if self._clamp is not None else self.text_height() + 2
-        )
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.fit_height()
 
 
 class _MessageViewDialog(QDialog):
@@ -652,9 +648,9 @@ class _MessageViewDialog(QDialog):
         preview_h = content.fontMetrics().lineSpacing() * self.PREVIEW_LINES
         if content.text_height(width) > preview_h + 2:
             # Trim the preview until it fits PREVIEW_LINES lines (wide glyphs
-            # such as CJK wrap differently than a plain char estimate), clamp
-            # the box height, and offer a tail link that restores the full
-            # selectable text.
+            # such as CJK wrap differently than a plain char estimate) and offer
+            # a tail link that restores the full selectable text. The height is
+            # not pinned: it follows whatever the trimmed text needs.
             char_w = content.fontMetrics().horizontalAdvance("0") or 1
             preview = body[: width // char_w * self.PREVIEW_LINES]
             while preview:
@@ -664,7 +660,6 @@ class _MessageViewDialog(QDialog):
                 preview = preview[: len(preview) * 9 // 10]
             else:
                 content.setPlainText("…")
-            content.set_clamped(preview_h)
             more = QLabel('<a href="#more">Show more</a>')
             more.setTextFormat(Qt.TextFormat.RichText)
             more.setTextInteractionFlags(
@@ -689,9 +684,9 @@ class _MessageViewDialog(QDialog):
         self._bubbles.insertWidget(self._bubbles.count() - 1, row)
 
     def _expand_bubble(self, message, content: "_BubbleBody", more: QLabel) -> None:
-        """Replace a collapsed 3-line preview with the full message text."""
+        """Replace a collapsed preview with the full message text."""
         content.setPlainText(_render(message.content, message.is_text) or "(empty)")
-        content.set_clamped(None)  # fit the whole text again
+        content.fit_height()  # the taller text needs a taller box
         more.deleteLater()
 
     def _update_header(self) -> None:
