@@ -446,7 +446,10 @@ class _BubbleBody(QTextEdit):
         palette.setColor(QPalette.ColorRole.Base, Qt.GlobalColor.transparent)
         self.setPalette(palette)
         self.viewport().setAutoFillBackground(False)
-        self.setStyleSheet("background: transparent; border: none;")
+        # Let the bubble's own shaded background show through. The padding must
+        # be reset too: the themes give QTextEdit 6px of it, which shrinks the
+        # viewport below the widget and clips the first line of every message.
+        self.setStyleSheet("background: transparent; border: none; padding: 0;")
         # Never wider than the cap, but free to shrink to whatever fits.
         self.setMaximumWidth(cap)
         # One tab stop per message would be unusable in a long log.
@@ -456,13 +459,23 @@ class _BubbleBody(QTextEdit):
         self.setFixedHeight(self.text_height(cap))
 
     def sizeHint(self) -> QSize:
-        """Ask for the widest a bubble may get.
+        """Ask for the width this text needs, up to the cap.
 
-        QTextEdit's own hint is a fixed 256px whatever the text is, which would
-        keep every bubble that narrow. Asking for the cap lets the layout hand
-        over as much width as is actually available.
+        QTextEdit's own hint is a fixed 256px whatever the text is, so a short
+        message would be padded out and a long one cut short. Using the widest
+        line keeps short messages compact and lets long ones fill the bubble.
         """
-        return QSize(self._cap, self.height())
+        width = self.natural_width()
+        return QSize(width, self.text_height(width))
+
+    def natural_width(self) -> int:
+        """The width the text wants on one line, capped at the bubble width."""
+        metrics = self.fontMetrics()
+        widest = max(
+            (metrics.horizontalAdvance(line) for line in self.toPlainText().split("\n")),
+            default=0,
+        )
+        return max(1, min(self._cap, widest + 2))
 
     def text_height(self, width: int) -> int:
         """Height this text needs when wrapped to ``width``."""
