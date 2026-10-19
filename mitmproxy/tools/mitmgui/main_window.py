@@ -3191,10 +3191,12 @@ class AutoRulesDialog(QDialog):
         btn_layout.addWidget(self._remove_btn)
 
         self._up_btn = QPushButton("Up")
+        self._up_btn.setToolTip("Move the selected rule up (runs earlier)")
         self._up_btn.clicked.connect(self._on_up)
         btn_layout.addWidget(self._up_btn)
 
         self._down_btn = QPushButton("Down")
+        self._down_btn.setToolTip("Move the selected rule down (runs later)")
         self._down_btn.clicked.connect(self._on_down)
         btn_layout.addWidget(self._down_btn)
 
@@ -3237,6 +3239,13 @@ class AutoRulesDialog(QDialog):
         self._table.verticalHeader().setDefaultSectionSize(int(row_h * 1.3))
         # Double-click a row opens the Edit Rule dialog
         self._table.cellDoubleClicked.connect(self._on_edit)
+        self._table.setToolTip(
+            "Rules run top to bottom, and each rule is matched against the "
+            "request as the rules above it have already rewritten it. A rule "
+            "that changes the Host header therefore stops a later rule from "
+            "matching \"Host: a.com\" — put the ones that rewrite the request "
+            "below the ones that only read it."
+        )
         main_layout.addWidget(self._table)
 
         # Load data
