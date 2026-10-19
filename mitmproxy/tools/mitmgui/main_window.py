@@ -7791,8 +7791,24 @@ class MitmGuiMainWindow(QMainWindow):
             # Http Versions are consulted per connection, so apply them right
             # away instead of waiting for the next listener restart.
             self._apply_http_versions()
+            self._apply_connection_strategy()
         if result == QDialog.DialogCode.Accepted and dlg.was_modified:
             self._restart_proxy()
+
+    def _apply_connection_strategy(self) -> None:
+        """Push the Connection Strategy setting to the running proxy.
+
+        The strategy is read whenever a connection is about to be made, so the
+        next request picks it up without restarting the listeners.
+        """
+        wanted = "lazy" if self._config.lazy_connections else "eager"
+        opts = self._master.options
+        if opts.connection_strategy == wanted:
+            return
+        try:
+            opts.update(connection_strategy=wanted)
+        except Exception as e:  # pragma: no cover - defensive
+            QMessageBox.warning(self, "Proxy Configuration Error", str(e))
 
     def _apply_http_versions(self) -> None:
         """Push the Http Versions settings to the running proxy options.

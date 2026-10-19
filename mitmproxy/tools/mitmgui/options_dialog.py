@@ -512,6 +512,24 @@ class OptionsDialog(QDialog):
 
         layout.addRow(http_versions)
 
+        conn_strategy = QGroupBox("Connection Strategy")
+        cs_layout = QVBoxLayout(conn_strategy)
+        cs_layout.setSpacing(4)
+
+        self._lazy_connections_cb = QCheckBox("Lazy connections")
+        self._lazy_connections_cb.setToolTip(
+            "Wait until the request rules have run before connecting upstream, so an "
+            "Auto Rule that rewrites the URL decides where the connection goes - "
+            "including to a host that is unreachable or blocked.\n\n"
+            "Turn this off to connect as early as possible (mitmproxy's \"eager\"): "
+            "the server's ALPN is mirrored exactly, but a rule can then only "
+            "redirect a host that is itself reachable."
+        )
+        self._lazy_connections_cb.setChecked(self._config.lazy_connections)
+        cs_layout.addWidget(self._lazy_connections_cb)
+
+        layout.addRow(conn_strategy)
+
         layout.addItem(None)
         return w
 
@@ -724,6 +742,7 @@ class OptionsDialog(QDialog):
         self._config.mcp_enabled = self._mcp_checkbox.isChecked()
         self._config.http2_enabled = self._http2_cb.isChecked()
         self._config.http3_enabled = self._http3_cb.isChecked()
+        self._config.lazy_connections = self._lazy_connections_cb.isChecked()
 
         # SendTo: filter empty rows (name or address blank = empty)
         sendto_entries = []

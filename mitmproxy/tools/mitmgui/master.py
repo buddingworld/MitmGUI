@@ -1076,7 +1076,11 @@ class MitmGuiMaster(master.Master):
         # redirects a.com to b.com could only ever work if a.com itself
         # happened to be reachable. "lazy" defers the connection until after
         # the request hooks, which is what lets a rule decide the target.
-        self.options.update(connection_strategy="lazy")
+        # Configurable under Options -> Connections.
+        from mitmproxy.tools.mitmgui.config import AppConfig
+
+        lazy = AppConfig().lazy_connections
+        self.options.update(connection_strategy="lazy" if lazy else "eager")
         self.response_intercept = _ResponseIntercept()
         self.breakpoint_req_intercept = _BreakpointRequestIntercept()
         self.hosts_remapping = _HostsRemappingAddon()

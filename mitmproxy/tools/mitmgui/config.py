@@ -27,6 +27,10 @@ class AppConfig:
         "connections": {
             "listen_host": "127.0.0.1",
             "listen_port": 8080,
+            # Defer the upstream connection until the request rules have run, so
+            # an Auto Rule that rewrites the URL decides where it goes. Off =
+            # mitmproxy's "eager": connect as soon as the CONNECT arrives.
+            "lazy_connections": True,
         },
         "gateway": {
             "mode": "no_proxy",  # "system", "manual", "no_proxy"
@@ -121,6 +125,15 @@ class AppConfig:
     @listen_port.setter
     def listen_port(self, val: int) -> None:
         self._data["connections"]["listen_port"] = val
+
+    @property
+    def lazy_connections(self) -> bool:
+        """True = defer upstream connections so Auto Rules pick the target."""
+        return bool(self._data["connections"].get("lazy_connections", True))
+
+    @lazy_connections.setter
+    def lazy_connections(self, val: bool) -> None:
+        self._data["connections"]["lazy_connections"] = bool(val)
 
     # ── Gateway ──
 
