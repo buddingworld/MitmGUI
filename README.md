@@ -15,7 +15,7 @@ MitmGUI 是基于 mitmproxy 内核构建的桌面抓包、调试和流量改写�
 - 实时会话列表，支持排序、多选、自动滚动和颜色标记。
 - 支持 HTTPS 解密，使用 mitmproxy CA 证书体系。
 - 会话详情包含 Headers、Cookies、Query、WebForms、Raw、Preview、ImageView 等视图。
-- Raw 视图支持搜索和编码切换，便于检查原始请求与响应内容；搜索栏的 `←` / `→` 在匹配之间前后跳转（循环），右键 `Copy To File` 可把选中文本按字节原样存到指定文件（含 NUL 等二进制字符）。
+- Raw 视图支持搜索和编码切换，便于检查原始请求与响应内容；搜索栏的 `←` / `→` 在匹配之间前后跳转（循环），右键 `Copy To File` 会按**当前显示编码**把选中内容还原成原始字节再存盘——用 latin-1 查看二进制（如 JPG）时保存出来的文件与原始数据逐字节一致，NUL 等字符也不会丢。
 - Raw / JSON / XML 视图支持右键 `Convert Selection`：URL、HTML、BASE64、BASE64 URL、Native 共 19 种转换。可编辑时直接替换选中文本，只读时弹出 `Converted Text` 窗口（带 `Copy To Clipboard`、和 Raw 相同的搜索栏、以及同样的 `Encoding` 子菜单——解码类转换会保留原始字节，切换 utf-8 / gbk / latin-1 可重新解读）；转换失败会在面板下方提示原因且不改动文本。
 - 支持会话保存、加载、清空和 URL 批量复制。
 

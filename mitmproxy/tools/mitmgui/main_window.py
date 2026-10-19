@@ -757,6 +757,9 @@ class _ScintillaTextEdit(QsciScintilla):
         # Whether the context menu offers "Convert Selection". Opt-in: only the
         # inspector's Raw / JSON / XML tabs enable it.
         self._convert_menu_enabled = False
+        # Encoding this editor's text was decoded with, when the host decoded
+        # it itself; None means "ask the owning InspectorPanel".
+        self._text_encoding: str | None = None
         self._persist_prefs = persist_prefs
         self.setReadOnly(True)
         self.setUtf8(True)
@@ -940,11 +943,11 @@ class _ScintillaTextEdit(QsciScintilla):
         opens the result in a Converted Text window instead. A conversion that
         fails reports why and changes nothing.
         """
-        selected = self.selected_bytes()
+        selected = self.selected_text()
         if not selected:
             return
         try:
-            converted = convert(selected.decode("utf-8", errors="replace"))
+            converted = convert(selected)
         except Exception as exc:  # noqa: BLE001 - any failure is the user's to see
             self._report_convert_failure(str(exc) or type(exc).__name__)
             return
@@ -985,8 +988,8 @@ class _ScintillaTextEdit(QsciScintilla):
         config.raw_word_wrap = checked
         config.save()
 
-    def selected_bytes(self) -> bytes:
-        """The selected text as raw UTF-8 bytes, NULs included.
+    def selected_text(self) -> str:
+        """The selected text exactly as shown, NULs included.
 
         QScintilla's ``selectedText()`` is deliberately avoided: it turns a NUL
         into a space, so a selection holding 0x00 would silently change. The
@@ -996,8 +999,39 @@ class _ScintillaTextEdit(QsciScintilla):
         start = self.SendScintilla(QsciScintillaBase.SCI_GETSELECTIONSTART)
         end = self.SendScintilla(QsciScintillaBase.SCI_GETSELECTIONEND)
         if end <= start:
+            return ""
+        utf8 = self.text().encode("utf-8", errors="replace")
+        return utf8[start:end].decode("utf-8", errors="replace")
+
+    def set_text_encoding(self, encoding: str | None) -> None:
+        """Record which encoding this editor's text was decoded with.
+
+        Needed to turn a selection back into the bytes it came from; hosts that
+        decode text themselves (the Converted Text window) set it, otherwise the
+        owning InspectorPanel's encoding is used.
+        """
+        self._text_encoding = encoding
+
+    def _display_encoding(self) -> str:
+        """The encoding the text in this editor was decoded with."""
+        if self._text_encoding is not None:
+            return self._text_encoding
+        if self._inspector is not None:
+            return self._inspector._encoding
+        return DEFAULT_ENCODING
+
+    def selected_bytes(self) -> bytes:
+        """The selection as the bytes it was decoded from.
+
+        The editor holds text, so the selection is re-encoded with the encoding
+        it was decoded with — encoding it as UTF-8 instead would turn every
+        latin-1 byte above 0x7F into two bytes (a 6-byte binary run would come
+        back as 12).
+        """
+        text = self.selected_text()
+        if not text:
             return b""
-        return self.text().encode("utf-8", errors="replace")[start:end]
+        return text.encode(self._display_encoding(), errors="replace")
 
     def replace_selection(self, payload: bytes) -> None:
         """Replace the selection with ``payload`` (raw UTF-8 bytes).
@@ -1441,6 +1475,9 @@ class ConvertedTextDialog(QDialog):
 
     def _apply_encoding(self) -> None:
         self._text = self._raw.decode(self._encoding, errors="replace")
+        # Tell the editor which encoding it is showing, so Copy To File can
+        # hand back the original bytes rather than a UTF-8 re-encoding.
+        self._editor.set_text_encoding(self._encoding)
         self._editor.setPlainText(self._text)
 
     def _copy(self) -> None:
