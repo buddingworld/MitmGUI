@@ -44,6 +44,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSpacerItem,
@@ -74,7 +75,7 @@ from mitmproxy import http, options
 from mitmproxy.tools import cmdline
 from mitmproxy.tools.mitmgui import themes
 from mitmproxy.tools.mitmgui.config import AppConfig
-from mitmproxy.tools.mitmgui.master import MitmGuiMaster, match_filter_rule
+from mitmproxy.tools.mitmgui.master import _AutoRulesAddon, MitmGuiMaster, match_filter_rule
 from mitmproxy.tools.mitmgui.mcp_server import MCP_URL, McpServer
 from mitmproxy.tools.mitmgui.session_list import SessionTableModel
 from mitmproxy.tools.mitmgui import text_convert
@@ -2854,6 +2855,8 @@ class AutoRuleDialog(QDialog):
 
     ITEMS = [
         "Request.Url",
+        "Request.Url.Path",
+        "Request.Url.QueryString",
         "Request.Header",
         "Request.Body",
         "Response.Header",
@@ -2865,7 +2868,7 @@ class AutoRuleDialog(QDialog):
     #: header locations are selectable.
     ADD_INS = ["Request.Headers", "Response.Headers"]
     REPLACE_INS = [
-        "URL",
+        "Request.Url",
         "Request.Headers",
         "Request.Body",
         "Response.Headers",
@@ -3029,7 +3032,11 @@ class AutoRuleDialog(QDialog):
             else:  # Replace
                 v = rule.get("value")
                 if isinstance(v, dict):
-                    self._replace_in_cb.setCurrentText(v.get("in", "URL"))
+                    # Rules saved before the rename used "URL" for the target.
+                    replace_in = v.get("in", "Request.Url")
+                    if replace_in == "URL":
+                        replace_in = "Request.Url"
+                    self._replace_in_cb.setCurrentText(replace_in)
                     self._replace_type_cb.setCurrentText(v.get("type", "String"))
                     self._replace_source_edit.setText(v.get("source", ""))
                     self._replace_dest_edit.setText(v.get("destination", ""))
@@ -4108,6 +4115,155 @@ class _CenteredCheckDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
+class PluginConfigDialog(QDialog):
+    """Settings window for one plugin, built from its ``config_schema()``.
+
+    Saving writes ``data/<plugin name>/config.json`` next to the plugin file
+    and reloads the plugin, so the new values are picked up immediately.
+    """
+
+    def __init__(self, addon, plugin_name: str, parent=None):
+        super().__init__(parent)
+        self._addon = addon
+        self._plugin_name = plugin_name
+        self._schema = addon.config_schema(plugin_name)
+        values = addon.load_config(plugin_name)
+        self._getters: dict[str, callable] = {}
+        self._widgets: dict[str, QWidget] = {}
+
+        self.setWindowTitle(f"Config - {plugin_name}")
+        self.setWindowIcon(_make_icon("tools", "#455A64"))
+        self.resize(560, 0)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        for field in self._schema:
+            widget, getter = self._build_editor(
+                field, values.get(field["key"], field["default"])
+            )
+            if field.get("description"):
+                widget.setToolTip(field["description"])
+            form.addRow(field["label"], widget)
+            self._getters[field["key"]] = getter
+            self._widgets[field["key"]] = widget
+        layout.addLayout(form)
+
+        hint = QLabel(f"Saved to {addon.config_path(plugin_name)}")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: rgba(128, 128, 128, 0.95); font-size: 10px;")
+        layout.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(self._save)
+        buttons.addWidget(save_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        buttons.addWidget(cancel_btn)
+        layout.addLayout(buttons)
+
+    # ── widget per field type ──
+
+    def _build_editor(self, field: dict, value):
+        """Return (widget, getter) for one schema field."""
+        ftype = field["type"]
+        if ftype == "number":
+            if isinstance(field["default"], float):
+                box = QDoubleSpinBox()
+                box.setDecimals(3)
+            else:
+                box = QSpinBox()
+            low = field.get("min")
+            high = field.get("max")
+            box.setRange(
+                low if low is not None else -2_147_483_647,
+                high if high is not None else 2_147_483_647,
+            )
+            if field.get("step"):
+                box.setSingleStep(field["step"])
+            box.setValue(value)
+            return box, box.value
+        if ftype == "bool":
+            box = QCheckBox()
+            box.setChecked(bool(value))
+            return box, box.isChecked
+        if ftype == "text":
+            edit = QPlainTextEdit()
+            edit.setPlainText("" if value is None else str(value))
+            edit.setMinimumHeight(edit.fontMetrics().lineSpacing() * 5)
+            return edit, edit.toPlainText
+        if ftype in ("combo", "radio", "checkbox"):
+            return self._build_choice_editor(field, value)
+        edit = QLineEdit("" if value is None else str(value))
+        return edit, edit.text
+
+    def _build_choice_editor(self, field: dict, value):
+        choices = field.get("choices") or []
+        if field["type"] == "combo":
+            box = QComboBox()
+            box.addItems(choices)
+            if value in choices:
+                box.setCurrentText(value)
+            return box, box.currentText
+
+        group = QWidget()
+        column = QVBoxLayout(group)
+        column.setContentsMargins(0, 0, 0, 0)
+        if field["type"] == "radio":
+            buttons = []
+            for choice in choices:
+                button = QRadioButton(choice)
+                button.setChecked(choice == value)
+                column.addWidget(button)
+                buttons.append(button)
+
+            def get_radio() -> str:
+                return next((b.text() for b in buttons if b.isChecked()), "")
+
+            return group, get_radio
+
+        boxes = []
+        if field.get("multi"):
+            selected = value if isinstance(value, list) else []
+            for choice in choices:
+                box = QCheckBox(choice)
+                box.setChecked(choice in selected)
+                column.addWidget(box)
+                boxes.append(box)
+
+            def get_multi() -> list:
+                return [b.text() for b in boxes if b.isChecked()]
+
+            return group, get_multi
+
+        for choice in choices:
+            box = QCheckBox(choice)
+            box.setChecked(choice == value)
+            box.clicked.connect(lambda _=False, b=box: self._exclusive(b, boxes))
+            column.addWidget(box)
+            boxes.append(box)
+
+        def get_single() -> str:
+            return next((b.text() for b in boxes if b.isChecked()), "")
+
+        return group, get_single
+
+    @staticmethod
+    def _exclusive(clicked: QCheckBox, boxes: list) -> None:
+        """Single-select checkboxes: ticking one clears the others."""
+        if not clicked.isChecked():
+            return
+        for box in boxes:
+            if box is not clicked:
+                box.setChecked(False)
+
+    def _save(self) -> None:
+        values = {key: getter() for key, getter in self._getters.items()}
+        self._addon.save_config(self._plugin_name, values)
+        self.accept()
+
+
 class PluginsDialog(QDialog):
     """Manage loaded plugins: name / enabled / path / info / order."""
 
@@ -4142,6 +4298,9 @@ class PluginsDialog(QDialog):
         self._table.setColumnWidth(4, order_w)
         self._table.setItemDelegateForColumn(0, _CenteredCheckDelegate(self._table))
         self._table.itemChanged.connect(self._on_item_changed)
+        # Right-click offers the plugin's own settings window.
+        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self._table)
 
         btn_row = QHBoxLayout()
@@ -4223,6 +4382,32 @@ class PluginsDialog(QDialog):
                 self.refresh()
 
     # ── actions ──
+
+    def _on_context_menu(self, pos) -> None:
+        """Right-click a plugin row: open its settings window."""
+        item = self._table.itemAt(pos)
+        if item is not None:
+            self._table.setCurrentItem(self._table.item(item.row(), 1))
+        name = self._current_plugin()
+        menu = QMenu(self._table)
+        config_action = menu.addAction("Config")
+        # Only plugins that declare a config_schema() have anything to show.
+        has_schema = bool(
+            name is not None
+            and self._win._master.plugins_addon.config_schema(name)
+        )
+        config_action.setEnabled(has_schema)
+        if not has_schema:
+            config_action.setToolTip("This plugin declares no config_schema()")
+        config_action.triggered.connect(lambda: self._open_config(name))
+        menu.exec(self._table.viewport().mapToGlobal(pos))
+
+    def _open_config(self, name: str | None) -> None:
+        if not name:
+            return
+        dlg = PluginConfigDialog(self._win._master.plugins_addon, name, self)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.show()
 
     def _load_clicked(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -7849,34 +8034,12 @@ class MitmGuiMainWindow(QMainWindow):
 
     @staticmethod
     def _auto_rule_text(flow, item: str) -> str:
-        """Return the matching text of ``item`` for a flow (same as the addon).
+        """Return the matching text of ``item`` for a flow.
 
-        Strings are used as-is (no automatic URL encoding/decoding): users
-        paste percent-encoded values themselves when they need to match them.
+        Delegates to the addon so the GUI's colour rules and the proxy-side
+        rules can never disagree about what an item means.
         """
-        if item == "Request.Url":
-            if not flow.request:
-                return ""
-            return flow.request.url
-        if item == "Request.Header":
-            if not flow.request:
-                return ""
-            return str(flow.request.headers)
-        if item == "Request.Body":
-            if not flow.request:
-                return ""
-            content = flow.request.get_text(strict=False)
-            return content or ""
-        if item == "Response.Header":
-            if not flow.response:
-                return ""
-            return str(flow.response.headers)
-        if item == "Response.Body":
-            if not flow.response:
-                return ""
-            content = flow.response.get_text(strict=False)
-            return content or ""
-        return ""
+        return _AutoRulesAddon._target_text(flow, item)
 
     @staticmethod
     def _auto_rule_matches(rule: dict, text: str) -> bool:

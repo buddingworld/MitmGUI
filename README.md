@@ -32,6 +32,7 @@ MitmGUI 是基于 mitmproxy 内核构建的桌面抓包、调试和流量改写�
 - Filter Rules：按 URL、Host、方法、状态码等条件过滤会话。
 - Breakpoint Rules：按规则拦截请求或响应，修改后再放行。
 - Auto Rules：自动执行颜色标记、响应替换、请求/响应内容替换。
+- Auto Rules 的匹配位置（Item）中 `Request.Url` 是完整 URL（`https://host/path?query`），另有 `Request.Url.Path`（`/path`）和 `Request.Url.QueryString`（`query`）两个条目；Replace 的目标（In）里原来的 `URL` 已统一为 `Request.Url`，旧规则里的 `URL` 仍可正常读取。
 - Auto Rules 的 `Add` 动作在指定 `Request.Headers` / `Response.Headers` 中不存在该 `Key` 时补上 `Key: Value`，已存在时不覆盖。
 - 编辑 GET 形式的请求包时不再自动加入 `Content-Length: 0`；用户自己写的 `Content-Length` 仍会被保留。
 - 右键 Copy - Session 仅在多个数据包之间插入 `======` 分割线，不再在末尾追加空行和分割线。
@@ -51,6 +52,7 @@ domain:888 domain:8888
 - 插件支持 mitmproxy 风格 hook，例如 `request`、`response`、`websocket_message`。
 - 插件 API 可访问会话列表、写入 Logs、打开 New Session。
 - 内置插件日志会进入 Logs 窗口的 Plugin 分类，便于排查插件行为。
+- 插件可自定义配置：在插件里写 `config_schema()` 声明参数（数字、单行/多行字符串、勾选框、下拉框、单选、多选），Plugins 窗口里右键插件选 `Config` 即可打开配置窗口。配置保存在插件同级的 `data/<插件名>/config.json`，保存后插件会自动重新加载；插件内用 `load_config()`（或 `api.load_config()`）读取。示例见 `plugins/Plugin_DemoConfig.py`。
 
 ### Tools 工具箱
 

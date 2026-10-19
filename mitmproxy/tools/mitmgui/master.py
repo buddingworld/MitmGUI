@@ -178,7 +178,8 @@ class _AutoRulesAddon:
     Rule format:
         {
           "enabled": true,
-          "item": "Request.Url" | "Request.Header" | "Request.Body"
+          "item": "Request.Url" | "Request.Url.Path" | "Request.Url.QueryString"
+                  | "Request.Header" | "Request.Body"
                   | "Response.Header" | "Response.Body",   # match location
           "match_type": "String" | "Regex",
           "match_value": "...",                            # match condition
@@ -201,13 +202,15 @@ class _AutoRulesAddon:
       ``Session_{timestamp}.txt`` once its response is available.
     - ``Replace`` rewrites the location selected by ``value.in``:
         value = {
-          "in": "URL" | "Request.Headers" | "Request.Body"
+          "in": "Request.Url" | "Request.Headers" | "Request.Body"
                 | "Response.Headers" | "Response.Body"
                 | "WebSocket.C2S" | "WebSocket.S2C" | "WebSocket.Both",
           "type": "String" | "Regex",
           "source": "...",
           "destination": "..."
         }
+      Rules written before the rename still say ``"URL"``; that is accepted as
+      an alias for ``Request.Url``.
       ``WebSocket.*`` targets rewrite the content of WebSocket messages
       (C2S = client -> server, S2C = server -> client, Both = either
       direction). They are applied in the ``websocket_message`` hook.
@@ -263,6 +266,9 @@ class _AutoRulesAddon:
     def _target_text(flow, item: str) -> str:
         """Return the text of ``item`` on a flow for matching purposes.
 
+        ``Request.Url`` is the whole URL (``https://host/path?query``); the two
+        extra items expose its parts on their own.
+
         Strings are used as-is (no automatic URL encoding/decoding): users
         paste percent-encoded values themselves when they need to match them.
         """
@@ -270,6 +276,14 @@ class _AutoRulesAddon:
             if not flow.request:
                 return ""
             return flow.request.url
+        if item == "Request.Url.Path":
+            if not flow.request:
+                return ""
+            return flow.request.path.partition("?")[0]
+        if item == "Request.Url.QueryString":
+            if not flow.request:
+                return ""
+            return flow.request.path.partition("?")[2]
         if item == "Request.Header":
             if not flow.request:
                 return ""
@@ -450,7 +464,7 @@ class _AutoRulesAddon:
         value = rule.get("value")
         if not isinstance(value, dict):
             return False
-        replace_in = value.get("in", "URL")
+        replace_in = value.get("in", "Request.Url")
         rtype = value.get("type", "String")
         source = value.get("source", "")
         destination = value.get("destination", "")
@@ -461,7 +475,7 @@ class _AutoRulesAddon:
             return message is not None and self._apply_replace_to_ws(
                 message, source, destination, rtype
             )
-        if replace_in == "URL":
+        if replace_in in ("Request.Url", "URL"):  # "URL" = rules saved before the rename
             if flow.request and flow.request.url:
                 # No automatic URL encoding: Source/Destination are applied
                 # as-is. Users paste percent-encoded values when needed.
@@ -490,10 +504,10 @@ class _AutoRulesAddon:
 
     @staticmethod
     def _replace_rule_in(value) -> str:
-        """The replace target location of a rule's value, defaulting to URL."""
+        """The replace target location of a rule's value, defaulting to the URL."""
         if isinstance(value, dict):
-            return value.get("in", "URL")
-        return "URL"
+            return value.get("in", "Request.Url")
+        return "Request.Url"
 
     def _apply_replace_matching(self, flow, target_ins: set[str]) -> None:
         """Apply every enabled Replace rule whose target is in ``target_ins``.
@@ -844,7 +858,9 @@ class _AutoRulesAddon:
         # Add rules targeting the request headers
         self._apply_add_matching(flow, {"Request.Headers"})
         # Replace rules targeting the request side (URL / Request.*)
-        self._apply_replace_matching(flow, {"URL", "Request.Headers", "Request.Body"})
+        self._apply_replace_matching(
+            flow, {"Request.Url", "URL", "Request.Headers", "Request.Body"}
+        )
 
     def response(self, flow) -> None:
         from mitmproxy import http
