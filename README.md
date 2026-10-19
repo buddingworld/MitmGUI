@@ -40,7 +40,7 @@ MitmGUI 是基于 mitmproxy 内核构建的桌面抓包、调试和流量改写�
 - Ctrl+F 查找会话：`确认搜索` 两侧的 `←` / `→` 在匹配结果之间跳转（循环），搜索窗口不再自动关闭；在 `确认搜索` 上右键选择 `搜索并选中` 可一次性选中所有匹配会话。
 - URL Replace 只改写连接目标（mitmproxy 按 `request.host` / `request.port` 选择上游服务器），**不改动 `Host` 头**；需要连 `Host` 一起改时，再加一条针对 `Request.Headers` 的规则即可（如 `Host: a.com` → `Host: b.com`）。
 - Config - Connections 里有 `Lazy connections` 开关（默认开启）：上游连接推迟到规则跑完之后才建立，因此连接目标由规则决定，不受原目标是否可达/能否解析影响。关掉则恢复 mitmproxy 的 eager 策略（会精确镜像服务端 ALPN，但规则只能重定向可达的目标）。
-- Hosts Remapping 支持连接目标重映射，并可保留原始 Host 头：
+- Hosts Remapping 支持连接目标重映射，并可保留原始 Host 头。它是在建连时改写地址（`server_connect` 钩子），所以 **eager / lazy 两种策略下都生效**，与上面的 `Lazy connections` 开关无关。
 
 ```text
 domain:888 domain:8888
