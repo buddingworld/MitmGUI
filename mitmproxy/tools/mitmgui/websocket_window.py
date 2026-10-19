@@ -430,7 +430,6 @@ class _BubbleBody(QTextEdit):
 
     def __init__(self, text: str, width: int, parent=None):
         super().__init__(parent)
-        self._measure_width = width
         self._clamp: int | None = None
         self.setReadOnly(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -454,13 +453,32 @@ class _BubbleBody(QTextEdit):
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.document().setDocumentMargin(0)
         self.setPlainText(text)
+        # Pin the width to what the text needs (up to the cap) before measuring
+        # the height. Left to the layout, a QTextEdit reports its default 256px
+        # hint, so the text wrapped far narrower than the height was measured
+        # for and the tail of every long message was cut off.
+        self._measure_width = self._fit_width(width)
+        self.setFixedWidth(self._measure_width)
         self._apply_height()
 
+    def _fit_width(self, cap: int) -> int:
+        """The width to lay this text out at: its widest line, up to ``cap``."""
+        metrics = self.fontMetrics()
+        widest = max(
+            (metrics.horizontalAdvance(line) for line in self.toPlainText().split("\n")),
+            default=0,
+        )
+        # +2 keeps the last glyph off the wrap boundary.
+        return max(1, min(cap, widest + 2))
+
     def text_height(self, width: int | None = None) -> int:
-        """Height the text needs when wrapped to ``width`` (default: the cap)."""
+        """Height the text needs when wrapped to ``width`` (default: its own)."""
         doc = self.document()
+        previous = doc.textWidth()
         doc.setTextWidth(self._measure_width if width is None else width)
-        return int(doc.size().height())
+        height = int(doc.size().height())
+        doc.setTextWidth(previous)  # measuring must not change how it renders
+        return height
 
     def set_clamped(self, height: int | None) -> None:
         """Collapse to ``height`` px, or pass None to fit the whole text."""
@@ -482,7 +500,9 @@ class _MessageViewDialog(QDialog):
     """
 
     REFRESH_MS = 400
-    MAX_BUBBLE_WIDTH = 520
+    #: Bubbles never grow wider than this. Raised 80% from the original 520 so
+    #: long payloads wrap later and use far more of the window.
+    MAX_BUBBLE_WIDTH = 936
     #: messages taller than this many lines collapse behind a "Show more" link
     PREVIEW_LINES = 3
 
@@ -494,7 +514,8 @@ class _MessageViewDialog(QDialog):
 
         self.setWindowTitle(f"WebSocket - {_session_title(flow, max_chars=80)}")
         self.setWindowIcon(_ws_icon())
-        self.resize(760, 620)
+        # Wide enough to show a full-width bubble (MAX_BUBBLE_WIDTH + margins).
+        self.resize(1100, 620)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
