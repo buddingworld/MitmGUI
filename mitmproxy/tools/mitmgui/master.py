@@ -1069,6 +1069,14 @@ class MitmGuiMaster(master.Master):
     async def _init_addons(self) -> None:
         self.events = eventstore.EventStore()
         self.addons.add(*addons.default_addons())
+        # The Auto Rules rewrite where a request goes, so nothing may connect
+        # upstream before they have run. mitmproxy's default "eager" strategy
+        # opens the connection the moment a CONNECT arrives - before any
+        # request, and therefore before any rule exists - so a rule that
+        # redirects a.com to b.com could only ever work if a.com itself
+        # happened to be reachable. "lazy" defers the connection until after
+        # the request hooks, which is what lets a rule decide the target.
+        self.options.update(connection_strategy="lazy")
         self.response_intercept = _ResponseIntercept()
         self.breakpoint_req_intercept = _BreakpointRequestIntercept()
         self.hosts_remapping = _HostsRemappingAddon()

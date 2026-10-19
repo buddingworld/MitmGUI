@@ -38,7 +38,7 @@ MitmGUI 是基于 mitmproxy 内核构建的桌面抓包、调试和流量改写�
 - 编辑 GET 形式的请求包时不再自动加入 `Content-Length: 0`；用户自己写的 `Content-Length` 仍会被保留。
 - 右键 Copy - Session 仅在多个数据包之间插入 `======` 分割线，不再在末尾追加空行和分割线。
 - Ctrl+F 查找会话：`确认搜索` 两侧的 `←` / `→` 在匹配结果之间跳转（循环），搜索窗口不再自动关闭；在 `确认搜索` 上右键选择 `搜索并选中` 可一次性选中所有匹配会话。
-- URL Replace 只改写连接目标（mitmproxy 按 `request.host` / `request.port` 选择上游服务器），**不改动 `Host` 头**；需要连 `Host` 一起改时，再加一条针对 `Request.Headers` 的规则即可（如 `Host: a.com` → `Host: b.com`）。
+- URL Replace 只改写连接目标（mitmproxy 按 `request.host` / `request.port` 选择上游服务器），**不改动 `Host` 头**；需要连 `Host` 一起改时，再加一条针对 `Request.Headers` 的规则即可（如 `Host: a.com` → `Host: b.com`）。代理使用 `connection_strategy=lazy`，上游连接推迟到规则跑完之后才建立，所以连接目标由规则决定，而不是由原目标是否可达决定。
 - Hosts Remapping 支持连接目标重映射，并可保留原始 Host 头：
 
 ```text
