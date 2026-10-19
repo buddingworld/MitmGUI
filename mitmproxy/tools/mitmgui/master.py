@@ -412,12 +412,40 @@ class _AutoRulesAddon:
         return text.replace(source, destination)
 
     @staticmethod
-    def _set_request_target_url_preserve_host_header(request, new_url: str) -> None:
+    def _set_request_target_url(request, new_url: str) -> None:
+        """Point the request at ``new_url``, host header included.
+
+        The Host header is left alone only when it deliberately differs from
+        the connection target — a hosts-remapped flow, or a Host the user set
+        by hand. When it is simply the request's own host it follows the new
+        URL: rewriting ``https://a.com/`` to ``https://b.com/`` while still
+        sending ``Host: a.com`` would leave the server answering for the old
+        site, and on HTTP/2 the stale header becomes ``:authority``, so the
+        rewrite had no visible effect at all.
+        """
         scheme, host, port, path = url.parse(new_url)
+        new_host = host.decode("idna")
+        # Request.host and Request.scheme hand back whatever data holds — bytes
+        # on a captured flow — so normalise before comparing with the Host
+        # header. The comparison is against the connection target, not
+        # pretty_host: pretty_host follows the Host header, so a hand-set Host
+        # would look like the request's own and get overwritten.
+        old_host = request.host
+        if isinstance(old_host, bytes):
+            old_host = old_host.decode("idna")
+        old_scheme = request.scheme
+        if isinstance(old_scheme, bytes):
+            old_scheme = old_scheme.decode("ascii", "replace")
+        current = url.hostport(old_scheme, old_host, request.port)
+        keep_host = request.host_header not in (None, current)
         request.data.scheme = scheme
-        request.data.host = host.decode("idna")
+        request.data.host = new_host
         request.data.port = port
         request.data.path = path
+        if not keep_host:
+            # host_header's setter does the right thing per protocol: the Host
+            # header on HTTP/1, the :authority pseudo-header on HTTP/2 and 3.
+            request.host_header = url.hostport(scheme, new_host, port)
 
     @staticmethod
     def _apply_replace_to_headers(headers, source: str, destination: str, rtype: str) -> bool:
@@ -499,7 +527,7 @@ class _AutoRulesAddon:
                     flow.request.url, source, destination, rtype
                 )
                 if new_url != flow.request.url:
-                    self._set_request_target_url_preserve_host_header(flow.request, new_url)
+                    self._set_request_target_url(flow.request, new_url)
                     return True
             return False
         if replace_in == "Request.Headers":
