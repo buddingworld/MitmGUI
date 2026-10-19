@@ -862,6 +862,27 @@ class _ScintillaTextEdit(QsciScintilla):
         self.setCursorPosition(0, 0)
         return self.findFirst(pattern, use_regex, False, False, False, True, 0, 0, False)
 
+    def find_previous(self, pattern: str, use_regex: bool) -> bool:
+        """Search backwards from the cursor; wrap around to the end of the
+        document when the start is reached (the mirror of :meth:`find_first`)."""
+        if self.hasSelectedText():
+            # Start at the beginning of the current match: a backward search
+            # from the caret would land on that same match again.
+            line, index, _, _ = self.getSelection()
+        else:
+            line, index = self.getCursorPosition()
+        if self.findFirst(
+            pattern, use_regex, False, False, False, False, line, index, False
+        ):
+            return True
+        last_line = max(self.lines() - 1, 0)
+        last_index = self.lineLength(last_line)
+        self.setCursorPosition(last_line, last_index)
+        return self.findFirst(
+            pattern, use_regex, False, False, False, False,
+            last_line, last_index, False,
+        )
+
     # ── placeholder overlay ──
 
     def _update_placeholder(self) -> None:
@@ -888,6 +909,9 @@ class _ScintillaTextEdit(QsciScintilla):
         wrap_action.setCheckable(True)
         wrap_action.setChecked(self.wrapMode() != QsciScintilla.WrapMode.WrapNone)
         wrap_action.triggered.connect(self._toggle_word_wrap)
+        copy_action = menu.addAction("Copy To File")
+        copy_action.setEnabled(self.hasSelectedText())
+        copy_action.triggered.connect(self._copy_to_file)
         paste_action = menu.addAction("Paste From File")
         paste_action.setEnabled(not self.isReadOnly())
         paste_action.triggered.connect(self._paste_from_file)
@@ -930,6 +954,10 @@ class _ScintillaTextEdit(QsciScintilla):
             dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             dlg.show()
         else:
+            # Decoders hand back bytes; the editor holds text, so decode them
+            # (the Converted Text window is where another charset can be tried).
+            if isinstance(converted, bytes):
+                converted = converted.decode(DEFAULT_ENCODING, errors="replace")
             self.replaceSelectedText(converted)
 
     def _report_convert_failure(self, reason: str) -> None:
@@ -953,6 +981,24 @@ class _ScintillaTextEdit(QsciScintilla):
         config = AppConfig()
         config.raw_word_wrap = checked
         config.save()
+
+    def _copy_to_file(self) -> None:
+        """Save the selected text to a file the user picks."""
+        text = self.selectedText()
+        if not text:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Copy Selection To File", "selection.txt", "All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Copy To File", f"Could not write {path}:\n{exc}"
+            )
 
     def _paste_from_file(self) -> None:
         """Read a file and replace the editor content with its decoded text
@@ -1000,10 +1046,23 @@ class _ScintillaTextEdit(QsciScintilla):
         config.save()
 
 
+def _make_arrow_button(glyph: str, tooltip: str) -> QToolButton:
+    """A flat arrow button, as used either side of the Find buttons.
+
+    The theme already paints QToolButton borderless and transparent, so it
+    reads as a plain glyph; the local rule only dims it while unusable.
+    """
+    button = QToolButton()
+    button.setText(glyph)
+    button.setToolTip(tooltip)
+    button.setEnabled(False)
+    button.setStyleSheet("QToolButton:disabled { color: palette(mid); }")
+    return button
+
+
 class _RawSearchBar(QWidget):
     """Bottom bar for the Raw tab: keyword search with a Regex toggle,
     Find-next navigation from the current cursor, and occurrence counting."""
-
     def __init__(self, editor: _ScintillaTextEdit, parent: QWidget | None = None):
         super().__init__(parent)
         self._editor = editor
@@ -1017,31 +1076,55 @@ class _RawSearchBar(QWidget):
         self._find_btn.setFixedWidth(56)
         self._count_btn.setFixedWidth(80)
 
+        # Previous / next match, with the same flat arrows the Find Sessions
+        # dialog puts either side of its search button.
+        self._prev_btn = _make_arrow_button("←", "Find the previous match")
+        self._prev_btn.clicked.connect(self._find_prev)
+        self._next_btn = _make_arrow_button("→", "Find the next match")
+        self._next_btn.clicked.connect(self._find_next)
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(6)
         layout.addWidget(self._keyword, 1)
         layout.addWidget(self._regex)
+        layout.addWidget(self._prev_btn)
         layout.addWidget(self._find_btn)
+        layout.addWidget(self._next_btn)
         layout.addWidget(self._count_btn)
 
         self._find_btn.clicked.connect(self._find_next)
         self._count_btn.clicked.connect(self._count_matches)
         self._keyword.returnPressed.connect(self._find_next)
+        self._keyword.textChanged.connect(self._update_arrow_buttons)
+        self._update_arrow_buttons(self._keyword.text())
+
+    def _update_arrow_buttons(self, text: str) -> None:
+        """The arrows need a keyword to search for, like the Find button."""
+        usable = bool(text.strip())
+        self._prev_btn.setEnabled(usable)
+        self._next_btn.setEnabled(usable)
 
     def _find_next(self) -> None:
+        self._find(forward=True)
+
+    def _find_prev(self) -> None:
+        self._find(forward=False)
+
+    def _find(self, forward: bool) -> None:
         pattern = self._keyword.text()
         if not pattern:
             return
         editor = self._editor
-        if self._regex.isChecked():
-            rx = QRegularExpression(pattern)
-            if not rx.isValid():
-                QMessageBox.warning(self, "Error", f"Invalid regular expression: {pattern}")
-                return
-            found = editor.find_first(pattern, True)
-        else:
-            found = editor.find_first(pattern, False)
+        use_regex = self._regex.isChecked()
+        if use_regex and not QRegularExpression(pattern).isValid():
+            QMessageBox.warning(self, "Error", f"Invalid regular expression: {pattern}")
+            return
+        found = (
+            editor.find_first(pattern, use_regex)
+            if forward
+            else editor.find_previous(pattern, use_regex)
+        )
         if not found:
             self._count_btn.setText("Count:0")
 
@@ -1275,12 +1358,20 @@ class ConvertedTextDialog(QDialog):
 
     The text is presented the way the Raw tab presents a message — wrapping,
     with the same keyword search bar underneath — so it can be read and
-    searched before being copied out.
+    searched before being copied out. Its context menu carries the same
+    Encoding submenu the Raw view offers: the decoders hand back raw bytes, so
+    picking another charset re-reads them (useful when e.g. base64 turned out
+    to hold GBK text).
     """
 
-    def __init__(self, text: str, parent=None):
+    def __init__(self, result, parent=None):
         super().__init__(parent)
-        self._text = text
+        # A decoder returns bytes; keeping them is what makes the Encoding
+        # menu meaningful. Text results are stored as their UTF-8 bytes so the
+        # menu behaves the same way for every conversion.
+        self._raw = result if isinstance(result, bytes) else result.encode("utf-8")
+        self._encoding = DEFAULT_ENCODING
+        self._text = ""
         self.setWindowTitle("Converted Text")
         self.setWindowIcon(_make_icon("replace", "#E65100"))
         self.resize(720, 460)
@@ -1297,15 +1388,34 @@ class ConvertedTextDialog(QDialog):
         buttons.addStretch()
         layout.addLayout(buttons)
 
-        editor = _ScintillaTextEdit(wrap=True, persist_prefs=False)
-        editor.setPlainText(text)
+        self._editor = _ScintillaTextEdit(wrap=True, persist_prefs=False)
+        self._editor._encoding_menu_hook = self._add_encoding_menu
         container = QWidget()
         box = QVBoxLayout(container)
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(0)
-        box.addWidget(editor)
-        box.addWidget(_RawSearchBar(editor))
+        box.addWidget(self._editor)
+        box.addWidget(_RawSearchBar(self._editor))
         layout.addWidget(container, 1)
+        self._apply_encoding()
+
+    def _add_encoding_menu(self, menu: QMenu) -> None:
+        """Add the Encoding submenu the Raw view's context menu has."""
+        encoding_menu = menu.addMenu("Encoding")
+        for enc in ENCODINGS:
+            action = encoding_menu.addAction(enc)
+            action.setCheckable(True)
+            action.setChecked(enc == self._encoding)
+            action.triggered.connect(lambda checked, e=enc: self._set_encoding(e))
+
+    def _set_encoding(self, encoding: str) -> None:
+        if encoding != self._encoding:
+            self._encoding = encoding
+            self._apply_encoding()
+
+    def _apply_encoding(self) -> None:
+        self._text = self._raw.decode(self._encoding, errors="replace")
+        self._editor.setPlainText(self._text)
 
     def _copy(self) -> None:
         """Put the converted text on the clipboard, confirming on the button."""
@@ -3302,27 +3412,15 @@ class FindDialog(QDialog):
         self._search_btn = QPushButton("\u786e\u8ba4\u641c\u7d22")
         self._search_btn.setEnabled(False)
         self._search_btn.clicked.connect(self._do_search)
-        # Step through the sessions matched by the last search. Plain arrow
-        # glyphs, not chunky buttons: the theme already paints QToolButton
-        # borderless and transparent, so the local rule only dims the arrows
-        # while they are unusable.
-        arrow_style = "QToolButton:disabled { color: palette(mid); }"
-        self._prev_btn = QToolButton()
-        self._prev_btn.setText("←")
-        self._prev_btn.setToolTip("Jump to the previous matching session")
-        self._prev_btn.setEnabled(False)
-        self._prev_btn.setStyleSheet(arrow_style)
+        # Step through the sessions matched by the last search.
+        self._prev_btn = _make_arrow_button("←", "Jump to the previous matching session")
         self._prev_btn.clicked.connect(lambda: self._jump_match(-1))
         btn_layout.addWidget(self._prev_btn)
         # Right-click offers to select every matching session at once.
         self._search_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._search_btn.customContextMenuRequested.connect(self._show_search_menu)
         btn_layout.addWidget(self._search_btn)
-        self._next_btn = QToolButton()
-        self._next_btn.setText("→")
-        self._next_btn.setToolTip("Jump to the next matching session")
-        self._next_btn.setEnabled(False)
-        self._next_btn.setStyleSheet(arrow_style)
+        self._next_btn = _make_arrow_button("→", "Jump to the next matching session")
         self._next_btn.clicked.connect(lambda: self._jump_match(1))
         btn_layout.addWidget(self._next_btn)
         self._cancel_btn = QPushButton("\u53d6\u6d88")

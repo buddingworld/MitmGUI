@@ -5,9 +5,14 @@ conversion applied to a selection produces what the matching tool would; the
 HTML group follows Burp's HTML options instead, since the Tools window has no
 HTML tab.
 
-Every converter takes the selected text and returns the converted text. On
-input it cannot handle it raises ``ValueError`` with a short reason, which the
-caller shows to the user.
+Every converter takes the selected text and returns the converted text. The
+decoders that recover raw bytes — percent- and base64-decoding — return
+``bytes`` instead, so a caller that can pick a charset (the Converted Text
+window's Encoding menu) can decode them itself; the in-place editor path
+decodes them as UTF-8.
+
+On input it cannot handle a converter raises ``ValueError`` with a short
+reason, which the caller shows to the user.
 """
 
 import base64
@@ -33,9 +38,9 @@ _HTML_KEY_ENTITIES = {
 # ── URL ──
 
 
-def url_decode(text: str) -> str:
-    """URL-decode, treating ``+`` as a space (as the Tools window does)."""
-    return urllib.parse.unquote_plus(text)
+def url_decode(text: str) -> bytes:
+    """URL-decode to bytes, treating ``+`` as a space (as the Tools window does)."""
+    return urllib.parse.unquote_to_bytes(text.replace("+", " "))
 
 
 def url_encode_key(text: str) -> str:
@@ -112,21 +117,26 @@ def html_encode_all_hex(text: str) -> str:
 # ── Base64 ──
 
 
-def _base64_bytes(text: str) -> bytes:
-    """Decode base64 text to bytes, ignoring whitespace from wrapped input."""
-    compact = "".join(text.split())
+def _base64_bytes(text) -> bytes:
+    """Decode base64 input to bytes, ignoring whitespace from wrapped input."""
+    if isinstance(text, bytes):
+        compact = b"".join(text.split())
+        pad = b"="
+    else:
+        compact = "".join(text.split())
+        pad = "="
     if not compact:
         raise ValueError("nothing to decode")
-    compact += "=" * (-len(compact) % 4)
+    compact += pad * (-len(compact) % 4)
     try:
         return base64.b64decode(compact, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ValueError(f"not valid base64 ({exc})") from exc
 
 
-def base64_decode(text: str) -> str:
-    """Decode base64 back to UTF-8 text."""
-    return _base64_bytes(text).decode("utf-8", errors="replace")
+def base64_decode(text: str) -> bytes:
+    """Decode base64 to bytes."""
+    return _base64_bytes(text)
 
 
 def base64_encode(text: str, padding: bool = True) -> str:
@@ -143,14 +153,14 @@ def base64_encode_urlencode(text: str, padding: bool = True) -> str:
     return urllib.parse.quote(base64_encode(text, padding), safe="")
 
 
-def urldecode_base64_decode(text: str) -> str:
-    """URL-decode, then base64-decode.
+def urldecode_base64_decode(text: str) -> bytes:
+    """URL-decode, then base64-decode, giving back the raw bytes.
 
-    Plain ``unquote`` rather than ``unquote_plus`` is used because a literal
-    ``+`` is meaningful inside base64 and must survive; an encoded ``%2B``
-    still decodes to ``+``.
+    Plain ``unquote_to_bytes`` rather than a ``+``-as-space decode is used
+    because a literal ``+`` is meaningful inside base64 and must survive; an
+    encoded ``%2B`` still decodes to ``+``.
     """
-    return base64_decode(urllib.parse.unquote(text))
+    return _base64_bytes(urllib.parse.unquote_to_bytes(text))
 
 
 # ── Native (Unicode escapes) ──
