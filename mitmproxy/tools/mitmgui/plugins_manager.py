@@ -3,6 +3,7 @@
 Plugins are standalone Python files loaded at runtime. Each plugin may
 define hook functions (or a ``Plugin`` class with the same methods):
 
+    def http_connect(flow, api): ...   # CONNECT, before the tunnel is opened
     def request(flow, api): ...
     def response(flow, api): ...
     def websocket_message(flow, message, api): ...
@@ -534,6 +535,18 @@ class _PluginsAddon:
                 self._log("Error", f"Plugin {p.name}.{hook}: {e}")
 
     # ── traffic hooks (registered via master.addons) ──
+
+    def http_connect(self, flow) -> None:
+        """CONNECT requests, before the tunnel is opened.
+
+        Plugins get this before mitmproxy decides where to connect, so they can
+        redirect the tunnel itself - which is the only way to reach a different
+        server when the original one is unreachable.
+        """
+        from mitmproxy import http
+        if not isinstance(flow, http.HTTPFlow):
+            return
+        self._dispatch("http_connect", flow)
 
     def request(self, flow) -> None:
         from mitmproxy import http
