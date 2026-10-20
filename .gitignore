@@ -38,3 +38,5 @@ certs/
 hosts.txt
 # local rules script, kept out of version control
 rules.py
+# local plugins and their data, kept out of version control
+plugins/
