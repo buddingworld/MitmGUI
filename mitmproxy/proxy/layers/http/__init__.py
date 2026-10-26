@@ -808,7 +808,12 @@ class HttpStream(layer.Layer):
         if (yield from self.check_killed(False)):
             return
 
-        self.context.server.address = (self.flow.request.host, self.flow.request.port)
+        destination = (self.flow.request.host, self.flow.request.port)
+        if self.context.server.address != destination:
+            # This connection object is reused for every CONNECT on this client connection,
+            # so an error recorded for the previous destination must not be replayed here.
+            self.context.server.error = None
+        self.context.server.address = destination
 
         if self.mode == HTTPMode.regular:
             yield from self.handle_connect_regular()

@@ -398,7 +398,8 @@ class TLSLayer(tunnel.TunnelLayer):
             return True, None
 
     def on_handshake_error(self, err: str) -> layer.CommandGenerator[None]:
-        self.conn.error = err
+        if not tunnel.is_transient_handshake_error(err):
+            self.conn.error = err
         if self.conn == self.context.client:
             yield TlsFailedClientHook(TlsData(self.conn, self.context, self.tls))
         else:

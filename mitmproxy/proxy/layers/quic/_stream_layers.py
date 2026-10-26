@@ -252,7 +252,8 @@ class QuicLayer(tunnel.TunnelLayer):
         return False, None
 
     def on_handshake_error(self, err: str) -> layer.CommandGenerator[None]:
-        self.conn.error = err
+        if not tunnel.is_transient_handshake_error(err):
+            self.conn.error = err
         if self.conn is self.context.client:
             yield TlsFailedClientHook(
                 QuicTlsData(self.conn, self.context, settings=self.tls)

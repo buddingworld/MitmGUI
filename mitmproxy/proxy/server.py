@@ -194,9 +194,20 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
             )
             self.log("transports closed!", logging.DEBUG)
 
+    def discard_transport(self, connection: Connection) -> None:
+        """
+        Drop the placeholder that `server_event` registered for a connection attempt.
+        A failed attempt leaves no I/O behind, and keeping its placeholder would make the
+        next `OpenConnection` for the same connection object trip over it.
+        """
+        io = self.transports.get(connection)
+        if io is not None and io.reader is None and io.writer is None:
+            del self.transports[connection]
+
     async def open_connection(self, command: commands.OpenConnection) -> None:
         if not command.connection.address:
             self.log(f"Cannot open connection, no hostname given.")
+            self.discard_transport(command.connection)
             await self.server_event(
                 events.OpenConnectionCompleted(
                     command, f"Cannot open connection, no hostname given."
@@ -212,6 +223,7 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
             self.log(
                 f"server connection to {human.format_address(command.connection.address)} killed before connect: {err}"
             )
+            self.discard_transport(command.connection)
             await self.handle_hook(server_hooks.ServerConnectErrorHook(hook_data))
             await self.server_event(
                 events.OpenConnectionCompleted(command, f"Connection killed: {err}")
@@ -241,6 +253,7 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
                     err = "connection cancelled"
                 self.log(f"error establishing server connection: {err}")
                 command.connection.error = err
+                self.discard_transport(command.connection)
                 await self.handle_hook(server_hooks.ServerConnectErrorHook(hook_data))
                 await self.server_event(events.OpenConnectionCompleted(command, err))
                 if isinstance(e, asyncio.CancelledError):

@@ -18,6 +18,25 @@ class TunnelState(Enum):
     CLOSED = auto()
 
 
+TRANSIENT_HANDSHAKE_ERRORS = (
+    # The peer hung up while we were still establishing the tunnel.
+    "connection closed",
+    # The connection was already gone when we wanted to start the handshake.
+    "connection closed early",
+)
+
+
+def is_transient_handshake_error(err: str) -> bool:
+    """
+    `Connection.error` signals that new connections to an endpoint should not be attempted,
+    for example because it uses an untrusted certificate. A peer that hangs up during the
+    handshake is a transient network condition instead: recording it there would replay the
+    error for every later request on the same client connection (see `HttpLayer.get_connection`),
+    that is an instant 502 that never recovers.
+    """
+    return err in TRANSIENT_HANDSHAKE_ERRORS
+
+
 class TunnelLayer(layer.Layer):
     """
     A specialized layer that simplifies the implementation of tunneling protocols such as SOCKS, upstream HTTP proxies,
