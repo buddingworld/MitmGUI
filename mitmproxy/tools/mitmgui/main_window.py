@@ -345,6 +345,33 @@ def _format_webforms(request: http.Request) -> str:
         return body
 
 
+def _form_raw_segments(raw: str, params: list[tuple[str, str]]) -> list[str | None]:
+    """Map parsed form params back to their original text in `raw`.
+
+    Matching happens after unquoting, so `a=%41` maps back to its original spelling
+    instead of the re-encoded `a=A`. Returns None for a param that no longer occurs in
+    `raw`, which is the case for rows the user edited in the WebForms table.
+    """
+    if not raw:
+        return [None] * len(params)
+    segments = raw.split("&")
+    parsed: list[tuple[str, str]] = []
+    for segment in segments:
+        key, _, value = segment.partition("=")
+        parsed.append((urllib.parse.unquote_plus(key), urllib.parse.unquote_plus(value)))
+    used = [False] * len(segments)
+    result: list[str | None] = []
+    for param in params:
+        for i, candidate in enumerate(parsed):
+            if not used[i] and candidate == param:
+                used[i] = True
+                result.append(segments[i])
+                break
+        else:
+            result.append(None)
+    return result
+
+
 def _raw_target_to_path(target: str) -> str:
     if target == "*":
         return target
@@ -1221,6 +1248,25 @@ class _ImageViewWidget(QScrollArea):
             self._label.setText("(failed to decode image)")
 
 
+class _ParamTable(QTableWidget):
+    """Param table whose Ctrl+C copies the selection instead of the current cell.
+
+    QTableWidget answers Ctrl+C itself by putting the current cell on the clipboard,
+    which is not what a table of selected rows should hand over.
+    """
+
+    def __init__(self, copy_selection, parent=None):
+        super().__init__(parent)
+        self._copy_selection = copy_selection
+
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self._copy_selection(self)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class _WebFormsWidget(QWidget):
     """Widget with two tables (Query String + Body) for WebForms display."""
 
@@ -1236,43 +1282,170 @@ class _WebFormsWidget(QWidget):
         self._query_label.setStyleSheet("font-weight: bold; padding: 2px 0;")
         layout.addWidget(self._query_label)
 
-        self._query_table = QTableWidget()
-        self._query_table.setColumnCount(2)
-        self._query_table.setHorizontalHeaderLabels(["Name", "Value"])
-        self._query_table.horizontalHeader().setStretchLastSection(True)
-        self._query_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self._query_table.setColumnWidth(0, 150)
-        self._query_table.verticalHeader().setVisible(False)
-        self._query_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._query_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._query_table.setAlternatingRowColors(True)
-        self._query_table.setWordWrap(True)
-        self._query_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
-        self._query_table.cellChanged.connect(self._on_cell_changed)
+        self._query_table = self._create_table()
         layout.addWidget(self._query_table)
 
         self._body_label = QLabel("Body")
         self._body_label.setStyleSheet("font-weight: bold; padding: 2px 0;")
         layout.addWidget(self._body_label)
 
-        self._body_table = QTableWidget()
-        self._body_table.setColumnCount(2)
-        self._body_table.setHorizontalHeaderLabels(["Name", "Value"])
-        self._body_table.horizontalHeader().setStretchLastSection(True)
-        self._body_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self._body_table.setColumnWidth(0, 150)
-        self._body_table.verticalHeader().setVisible(False)
-        self._body_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._body_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self._body_table.setAlternatingRowColors(True)
-        self._body_table.setWordWrap(True)
-        self._body_table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        self._body_table = self._create_table()
         layout.addWidget(self._body_table)
+
+        # Raw query string / PostString, used by "Copy As Raw".
+        self._raw_query = ""
+        self._raw_body = ""
 
         # Track whether user manually edited either table since last populate.
         self._modified = False
-        self._query_table.cellChanged.connect(self._on_cell_changed)
-        self._body_table.cellChanged.connect(self._on_cell_changed)
+
+    def _create_table(self) -> QTableWidget:
+        """Build one of the two param tables.
+
+        Selection is per cell so that the highlighted cell is the one the user clicked.
+        Clicking a row number in the vertical header selects that whole row, with Qt's
+        usual Ctrl (toggle) / Shift (extend) behaviour.
+        """
+        table = _ParamTable(self._copy_selection)
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["Name", "Value"])
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(0, 150)
+        table.verticalHeader().setVisible(True)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(True)
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(
+            lambda pos, t=table: self._on_context_menu(t, pos)
+        )
+        table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        table.cellChanged.connect(self._on_cell_changed)
+        return table
+
+    # ── Selection ──
+
+    def _selected_rows(self, table: QTableWidget) -> list[int]:
+        """The selected rows, but only when the selection covers them completely.
+
+        A partial selection (a cell or a block of cells) is not a row selection, so it
+        returns an empty list and the callers fall back to cell semantics.
+        """
+        indexes = table.selectionModel().selectedIndexes()
+        if not indexes:
+            return []
+        columns: dict[int, set[int]] = {}
+        for index in indexes:
+            columns.setdefault(index.row(), set()).add(index.column())
+        if any(len(cols) != table.columnCount() for cols in columns.values()):
+            return []
+        return sorted(columns)
+
+    # ── Copying ──
+
+    def _table_params(self, table: QTableWidget) -> list[tuple[str, str]]:
+        """The table contents, index-aligned with the rows.
+
+        Unlike get_query_params()/get_body_params() this keeps rows without a name, so
+        row indices keep matching the raw text the table was populated from.
+        """
+        params: list[tuple[str, str]] = []
+        for row in range(table.rowCount()):
+            name_item = table.item(row, 0)
+            value_item = table.item(row, 1)
+            params.append(
+                (
+                    name_item.text() if name_item else "",
+                    value_item.text() if value_item else "",
+                )
+            )
+        return params
+
+    def _kv_table_text(self, table: QTableWidget) -> str:
+        """Selected rows as key/value pairs, one `name<TAB>value` per line."""
+        params = self._table_params(table)
+        return "\n".join(
+            f"{params[row][0]}\t{params[row][1]}" for row in self._selected_rows(table)
+        )
+
+    def _selection_as_tsv(self, table: QTableWidget) -> str:
+        """The selected cells as tab-separated lines, for cell/block selections."""
+        indexes = table.selectionModel().selectedIndexes()
+        if not indexes:
+            return ""
+        columns: dict[int, list[int]] = {}
+        for index in indexes:
+            columns.setdefault(index.row(), []).append(index.column())
+        lines = []
+        for row in sorted(columns):
+            cells = []
+            for column in sorted(columns[row]):
+                item = table.item(row, column)
+                cells.append(item.text() if item else "")
+            lines.append("\t".join(cells))
+        return "\n".join(lines)
+
+    def _copy_as_raw(self, table: QTableWidget) -> None:
+        """Selected rows as they appear in the original query string / PostString."""
+        rows = self._selected_rows(table)
+        if not rows:
+            return
+        params = self._table_params(table)
+        raw = self._raw_body if table is self._body_table else self._raw_query
+        segments = _form_raw_segments(raw, params)
+        parts = []
+        for row in rows:
+            segment = segments[row]
+            # Rows that no longer occur in the raw text (edited values) are re-encoded.
+            parts.append(segment if segment is not None else urllib.parse.urlencode([params[row]]))
+        self._copy_text("&".join(parts))
+
+    def _copy_selection(self, table: QTableWidget) -> None:
+        """Ctrl+C: whole rows copy as key/value pairs, cells copy as a TSV block."""
+        text = (
+            self._kv_table_text(table)
+            if self._selected_rows(table)
+            else self._selection_as_tsv(table)
+        )
+        self._copy_text(text)
+
+    @staticmethod
+    def _copy_text(text: str) -> None:
+        if text:
+            QApplication.clipboard().setText(text)
+
+    def _on_context_menu(self, table: QTableWidget, pos) -> None:
+        index = table.indexAt(pos)
+        if index.isValid() and not table.selectionModel().isSelected(index):
+            # Right-clicking outside the selection moves it there first, so that the
+            # menu always acts on what the user pointed at.
+            table.clearSelection()
+            table.setCurrentCell(index.row(), index.column())
+            table.selectionModel().select(
+                index, QItemSelectionModel.SelectionFlag.ClearAndSelect
+            )
+        self._build_context_menu(table).exec(table.viewport().mapToGlobal(pos))
+
+    def _build_context_menu(self, table: QTableWidget) -> QMenu:
+        """A cell selection offers Copy, a whole-row selection the two row formats."""
+        menu = QMenu(table)
+        if self._selected_rows(table):
+            kv_action = menu.addAction("Copy As KvTable")
+            kv_action.triggered.connect(
+                lambda: self._copy_text(self._kv_table_text(table))
+            )
+            raw_action = menu.addAction("Copy As Raw")
+            raw_action.triggered.connect(lambda: self._copy_as_raw(table))
+        else:
+            copy_action = menu.addAction("Copy")
+            copy_action.setEnabled(bool(table.selectionModel().selectedIndexes()))
+            copy_action.triggered.connect(
+                lambda: self._copy_text(self._selection_as_tsv(table))
+            )
+        return menu
 
     def _on_cell_double_clicked(self, row: int, col: int) -> None:
         """When double-clicking a Value cell, show a multi-line editor dialog."""
@@ -1316,8 +1489,20 @@ class _WebFormsWidget(QWidget):
     def reset_modified(self) -> None:
         self._modified = False
 
-    def set_params(self, query_params: list[tuple[str, str]], body_params: list[tuple[str, str]]):
-        """Populate both tables and resize Name column to 35%."""
+    def set_params(
+        self,
+        query_params: list[tuple[str, str]],
+        body_params: list[tuple[str, str]],
+        raw_query: str = "",
+        raw_body: str = "",
+    ):
+        """Populate both tables and resize Name column to 35%.
+
+        `raw_query` / `raw_body` are the original texts the params were parsed from;
+        "Copy As Raw" hands back the matching part of them.
+        """
+        self._raw_query = raw_query
+        self._raw_body = raw_body
         self._populate_table(self._query_table, query_params, self._query_label)
         self._populate_table(self._body_table, body_params, self._body_label)
         self._modified = False
@@ -1365,6 +1550,9 @@ class _WebFormsWidget(QWidget):
         for row, (name, value) in enumerate(params):
             table.setItem(row, 0, QTableWidgetItem(name))
             table.setItem(row, 1, QTableWidgetItem(value))
+        # The rows no longer describe the same params after a repopulate, so a leftover
+        # selection would point at unrelated data.
+        table.clearSelection()
         # Set Name column to 25% of table width
         total_w = table.viewport().width()
         if total_w > 0:
@@ -1806,11 +1994,14 @@ class InspectorPanel(QWidget):
 
         query_items: list[tuple[str, str]] = []
         body_items: list[tuple[str, str]] = []
+        raw_query = ""
+        raw_body_text = ""
 
         # Extract query string params from URL
         if req.path:
             parsed = urlsplit(req.path)
             if parsed.query:
+                raw_query = parsed.query
                 qs = parse_qs(parsed.query, keep_blank_values=True)
                 for k, vals in qs.items():
                     for v in vals:
@@ -1828,6 +2019,7 @@ class InspectorPanel(QWidget):
             if "x-www-form-urlencoded" in ct:
                 try:
                     body = raw_body.decode(self._encoding, errors="replace").replace("\ufffd", "??")
+                    raw_body_text = body
                     body_qs = parse_qs(body, keep_blank_values=True)
                     for k, vals in body_qs.items():
                         for v in vals:
@@ -1836,7 +2028,9 @@ class InspectorPanel(QWidget):
                     pass
 
         if self._webforms_widget:
-            self._webforms_widget.set_params(query_items, body_items)
+            self._webforms_widget.set_params(
+                query_items, body_items, raw_query, raw_body_text
+            )
 
     def apply_webforms_edits(self, flow) -> None:
         """Apply WebForms table edits back to the flow's request.
