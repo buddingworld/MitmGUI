@@ -1381,12 +1381,17 @@ class _ParamTable(QTableWidget):
     """Param table whose Ctrl+C copies the selection instead of the current cell.
 
     QTableWidget answers Ctrl+C itself by putting the current cell on the clipboard,
-    which is not what a table of selected rows should hand over.
+    which is not what a table of selected rows should hand over. Double-clicking the
+    empty space right below the last row appends one.
     """
 
-    def __init__(self, copy_selection, parent=None):
+    # How many rows of empty space below the last row accept a double-click.
+    BLANK_ROWS_FOR_NEW_ROW = 2
+
+    def __init__(self, copy_selection, new_row, parent=None):
         super().__init__(parent)
         self._copy_selection = copy_selection
+        self._new_row = new_row
 
     def keyPressEvent(self, event) -> None:
         if event.matches(QKeySequence.StandardKey.Copy):
@@ -1394,6 +1399,27 @@ class _ParamTable(QTableWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self._is_blank_area_below_rows(event.pos()):
+            self._new_row(self)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _is_blank_area_below_rows(self, pos: QPoint) -> bool:
+        """Whether `pos` is empty space within a few rows below the last one."""
+        if self.editTriggers() == QTableWidget.EditTrigger.NoEditTriggers:
+            return False  # read-only: a new row could not be filled in
+        if self.indexAt(pos).isValid():
+            return False
+        row_height = self.verticalHeader().defaultSectionSize()
+        if self.rowCount() == 0:
+            top = 0
+        else:
+            last = self.rowCount() - 1
+            top = self.rowViewportPosition(last) + self.rowHeight(last)
+        return top <= pos.y() <= top + self.BLANK_ROWS_FOR_NEW_ROW * row_height
 
 
 class _WebFormsWidget(QWidget):
@@ -1435,7 +1461,7 @@ class _WebFormsWidget(QWidget):
         Clicking a row number in the vertical header selects that whole row, with Qt's
         usual Ctrl (toggle) / Shift (extend) behaviour.
         """
-        table = _ParamTable(self._copy_selection)
+        table = _ParamTable(self._copy_selection, self._append_row)
         table.setColumnCount(2)
         table.setHorizontalHeaderLabels(["Name", "Value"])
         table.horizontalHeader().setStretchLastSection(True)
@@ -1451,9 +1477,46 @@ class _WebFormsWidget(QWidget):
         table.customContextMenuRequested.connect(
             lambda pos, t=table: self._on_context_menu(t, pos)
         )
+        # Right-clicking a row number inserts a row above/below it.
+        table.verticalHeader().setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        table.verticalHeader().customContextMenuRequested.connect(
+            lambda pos, t=table: self._on_header_context_menu(t, pos)
+        )
         table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         table.cellChanged.connect(self._on_cell_changed)
         return table
+
+    # ── Adding rows ──
+
+    def _append_row(self, table: QTableWidget) -> None:
+        """Double-clicked the empty space below the rows: add one at the end."""
+        self._insert_row(table, table.rowCount())
+
+    def _insert_row(self, table: QTableWidget, row: int) -> None:
+        """Insert an empty param row at `row` and start editing its name."""
+        table.insertRow(row)
+        table.setItem(row, 0, QTableWidgetItem(""))
+        table.setItem(row, 1, QTableWidgetItem(""))
+        table.resizeRowToContents(row)
+        table.setCurrentCell(row, 0)
+        table.editItem(table.item(row, 0))
+
+    def _on_header_context_menu(self, table: QTableWidget, pos) -> None:
+        header = table.verticalHeader()
+        row = header.logicalIndexAt(pos)
+        if row < 0 or table.editTriggers() == QTableWidget.EditTrigger.NoEditTriggers:
+            return  # nothing to insert next to (or the table is read-only)
+        self._build_header_menu(table, row).exec(header.viewport().mapToGlobal(pos))
+
+    def _build_header_menu(self, table: QTableWidget, row: int) -> QMenu:
+        menu = QMenu(table)
+        above = menu.addAction("Insert Row Above")
+        above.triggered.connect(lambda: self._insert_row(table, row))
+        below = menu.addAction("Insert Row Below")
+        below.triggered.connect(lambda: self._insert_row(table, row + 1))
+        return menu
 
     # ── Selection ──
 
@@ -1637,10 +1700,25 @@ class _WebFormsWidget(QWidget):
         self._modified = False
 
     def set_editable(self, editable: bool) -> None:
-        """Toggle editability of both tables."""
+        """Toggle editability of both tables.
+
+        An empty table stays visible while editing, because that is where the first
+        row gets added (double-click below the rows, or via the row number).
+        """
         triggers = QTableWidget.EditTrigger.AllEditTriggers if editable else QTableWidget.EditTrigger.NoEditTriggers
-        self._query_table.setEditTriggers(triggers)
-        self._body_table.setEditTriggers(triggers)
+        for table, label in (
+            (self._query_table, self._query_label),
+            (self._body_table, self._body_label),
+        ):
+            table.setEditTriggers(triggers)
+            self._update_table_visibility(table, label)
+
+    def _update_table_visibility(self, table: QTableWidget, label: QLabel) -> None:
+        visible = table.rowCount() > 0 or (
+            table.editTriggers() != QTableWidget.EditTrigger.NoEditTriggers
+        )
+        table.setVisible(visible)
+        label.setVisible(visible)
 
     def get_query_params(self) -> list[tuple[str, str]]:
         """Read current query string params from the table.
@@ -1686,8 +1764,7 @@ class _WebFormsWidget(QWidget):
         total_w = table.viewport().width()
         if total_w > 0:
             table.setColumnWidth(0, int(total_w * self.NAME_WIDTH_RATIO))
-        label.setVisible(len(params) > 0)
-        table.setVisible(len(params) > 0)
+        self._update_table_visibility(table, label)
         table.resizeRowsToContents()
 
     def resizeEvent(self, event):
