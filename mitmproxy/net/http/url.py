@@ -45,11 +45,20 @@ def parse(url: str | bytes) -> tuple[bytes, bytes, int, bytes]:
 
     if isinstance(url, bytes):
         url = url.decode()
-        if not ascii_check(url):
-            url = urllib.parse.urlsplit(url)  # type: ignore
-            url = list(url)  # type: ignore
-            url[3] = urllib.parse.quote(url[3])  # type: ignore
-            url = urllib.parse.urlunsplit(url)  # type: ignore
+    if not ascii_check(url):
+        # The URL has non-ASCII parts (an IDN host, a Chinese path or query). Percent-encode
+        # path, query and fragment so that they can be represented in ASCII; the host is
+        # IDNA-encoded further down. Existing escapes are kept as they are.
+        scheme, netloc, path, query, fragment = urllib.parse.urlsplit(url)
+        url = urllib.parse.urlunsplit(
+            (
+                scheme,
+                netloc,
+                urllib.parse.quote(path, safe="/%"),
+                urllib.parse.quote(query, safe="!$&'()*+,;=:@/?%"),
+                urllib.parse.quote(fragment, safe="!$&'()*+,;=:@/?%"),
+            )
+        )
 
     parsed: urllib.parse.SplitResult = urllib.parse.urlsplit(url)
     if not parsed.hostname:
@@ -57,7 +66,17 @@ def parse(url: str | bytes) -> tuple[bytes, bytes, int, bytes]:
     else:
         host = parsed.hostname.encode("idna")
 
-    parsed_b: urllib.parse.SplitResultBytes = parsed.encode("ascii")  # type: ignore
+    if parsed.netloc.isascii():
+        parsed_b: urllib.parse.SplitResultBytes = parsed.encode("ascii")  # type: ignore
+    else:
+        # The URL carries its IDN in UTF-8 rather than in punycode, so the netloc cannot
+        # be encoded to ASCII as it is. `host` is already IDNA-encoded, build it from that.
+        netloc = host.decode("ascii")
+        if ":" in netloc:  # IPv6 literal, .hostname dropped the brackets
+            netloc = f"[{netloc}]"
+        if parsed.port:
+            netloc += f":{parsed.port}"
+        parsed_b = parsed._replace(netloc=netloc).encode("ascii")
 
     port = parsed_b.port
     if not port:
@@ -179,7 +198,14 @@ def parse_authority(authority: AnyStr, check: bool) -> tuple[str, int | None]:
             m = _authority_re.match(authority.decode("utf-8"))
             if not m:
                 raise ValueError
-            host = m["host"].encode("utf-8").decode("idna")
+            host = m["host"]
+            if host.isascii():
+                host = host.encode("utf-8").decode("idna")
+            else:
+                # Clients are not obliged to send punycode, and some (curl without
+                # libidn, various apps) put the IDN in UTF-8 into the request line.
+                # Convert it to its IDNA form instead of rejecting the request.
+                host = host.encode("idna").decode()
         else:
             m = _authority_re.match(authority)
             if not m:
