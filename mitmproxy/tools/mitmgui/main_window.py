@@ -316,11 +316,14 @@ def _looks_like_json(content: bytes | None, content_type: str) -> bool:
     return content[:512].lstrip()[:1] in (b"{", b"[")
 
 
-def _json_value_text(value) -> str:
-    """One-line text for a scalar JSON value."""
-    if isinstance(value, str) and len(value) > _JSON_VALUE_PREVIEW:
+def _json_value_text(value, limit: int | None = _JSON_VALUE_PREVIEW) -> str:
+    """One-line text for a scalar JSON value, truncated to `limit` characters.
+
+    `limit=None` returns the full value, which is what copying a row uses.
+    """
+    if isinstance(value, str) and limit is not None and len(value) > limit:
         return (
-            json_mod.dumps(value[:_JSON_VALUE_PREVIEW], ensure_ascii=False)
+            json_mod.dumps(value[:limit], ensure_ascii=False)
             + f" \u2026 ({len(value)} chars)"
         )
     return json_mod.dumps(value, ensure_ascii=False)
@@ -1284,11 +1287,31 @@ class _ImageViewWidget(QScrollArea):
             self._label.setText("(failed to decode image)")
 
 
+_JSON_MESSAGE = object()
+"""Marker value for tree rows that are a notice, not a JSON node."""
+
+
+class _JsonNode:
+    """Opaque holder for the Python value behind a tree row.
+
+    Handing a dict or a list to Qt directly turns it into a QVariantMap/-List and drops
+    the original key order; wrapping it keeps the exact object. Wrapping scalars too
+    avoids surprises with large integers.
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value) -> None:
+        self.value = value
+
+
 class _JsonTreeView(QTreeWidget):
     """Expandable view of a JSON document.
 
     Rendering stops at JSON_NODE_LIMIT nodes: a document can easily contain hundreds of
-    thousands of values, which would freeze the UI while the tree is being built.
+    thousands of values, which would freeze the UI while the tree is being built. Every
+    row keeps the Python value it was built from, so copying a node hands out the real
+    value even when the row only shows a truncated preview.
     """
 
     def __init__(self, parent=None):
@@ -1310,7 +1333,9 @@ class _JsonTreeView(QTreeWidget):
     def show_message(self, text: str) -> None:
         self.clear()
         self._nodes = 0
-        self.addTopLevelItem(QTreeWidgetItem(["", text]))
+        item = QTreeWidgetItem(["", text])
+        item.setData(0, Qt.ItemDataRole.UserRole, _JSON_MESSAGE)
+        self.addTopLevelItem(item)
 
     def set_json(self, document) -> None:
         """Show `document`, with the outermost node expanded and the rest folded."""
@@ -1321,17 +1346,21 @@ class _JsonTreeView(QTreeWidget):
             self.addTopLevelItem(root)
             root.setExpanded(True)
             if self._nodes >= JSON_NODE_LIMIT:
-                self.addTopLevelItem(
-                    QTreeWidgetItem(["", f"(stopped after {JSON_NODE_LIMIT} nodes)"])
-                )
+                notice = QTreeWidgetItem(["", f"(stopped after {JSON_NODE_LIMIT} nodes)"])
+                notice.setData(0, Qt.ItemDataRole.UserRole, _JSON_MESSAGE)
+                self.addTopLevelItem(notice)
 
     def _build_item(self, key: str, value) -> QTreeWidgetItem | None:
         if self._nodes >= JSON_NODE_LIMIT:
             return None
         self._nodes += 1
-        if not isinstance(value, (dict, list)):
-            return QTreeWidgetItem([key, _json_value_text(value)])
-        item = QTreeWidgetItem([key, _json_container_text(value)])
+        container = isinstance(value, (dict, list))
+        item = QTreeWidgetItem(
+            [key, _json_container_text(value) if container else _json_value_text(value)]
+        )
+        item.setData(0, Qt.ItemDataRole.UserRole, _JsonNode(value))
+        if not container:
+            return item
         entries = value.items() if isinstance(value, dict) else enumerate(value)
         children = []
         for child_key, child_value in entries:
@@ -1346,18 +1375,98 @@ class _JsonTreeView(QTreeWidget):
             item.addChildren(children)
         return item
 
-    # ── Expand / collapse ──
+    # ── Copying ──
+
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self._copy_rows()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _copy_rows(self) -> None:
+        """Ctrl+C: the selected rows as `key<TAB>value` lines."""
+        lines = []
+        for item in self._selected_items_in_order():
+            key = item.text(0)
+            value = self._row_value_text(item)
+            # Rows without a key (the document root, a notice) have nothing to prefix.
+            lines.append(f"{key}\t{value}" if key else value)
+        self._copy_text("\n".join(lines))
+
+    def _selected_items_in_order(self) -> list[QTreeWidgetItem]:
+        """Selected rows, in the order they appear in the tree."""
+        items: list[QTreeWidgetItem] = []
+        stack = [self.topLevelItem(i) for i in range(self.topLevelItemCount() - 1, -1, -1)]
+        while stack:
+            item = stack.pop()
+            if item.isSelected():
+                items.append(item)
+            for i in range(item.childCount() - 1, -1, -1):
+                stack.append(item.child(i))
+        return items
+
+    def _node_value(self, item: QTreeWidgetItem):
+        """The Python value of `item`, or _JSON_MESSAGE for a notice row."""
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        return data.value if isinstance(data, _JsonNode) else data
+
+    def _row_value_text(self, item: QTreeWidgetItem) -> str:
+        """The value of a row for `key<TAB>value`: full for scalars, summary for containers."""
+        value = self._node_value(item)
+        if value is _JSON_MESSAGE:
+            return item.text(1)
+        if isinstance(value, (dict, list)):
+            return item.text(1)  # "{…} 3 items" - use "Copy Node as JSON" for the content
+        return _json_value_text(value, limit=None)
+
+    def _value_json(self, item: QTreeWidgetItem, pretty: bool = False) -> str:
+        value = self._node_value(item)
+        if value is _JSON_MESSAGE:
+            return item.text(1)
+        return json_mod.dumps(value, ensure_ascii=False, indent=2 if pretty else None)
+
+    @staticmethod
+    def _copy_text(text: str) -> None:
+        if text:
+            QApplication.clipboard().setText(text)
+
+    # ── Context menu ──
 
     def _on_context_menu(self, pos) -> None:
-        item = self.itemAt(pos)
+        self._build_context_menu(self.itemAt(pos)).exec(
+            self.viewport().mapToGlobal(pos)
+        )
+
+    def _build_context_menu(self, item: QTreeWidgetItem | None) -> QMenu:
         menu = QMenu(self)
+        is_node = item is not None and self._node_value(item) is not _JSON_MESSAGE
+        if is_node:
+            key = item.text(0)
+            copy_key = menu.addAction("Copy Key")
+            copy_key.setEnabled(bool(key))
+            copy_key.triggered.connect(lambda: self._copy_text(key))
+            copy_value = menu.addAction("Copy Value")
+            copy_value.triggered.connect(lambda: self._copy_text(self._value_json(item)))
+            copy_key_value = menu.addAction("Copy Key: Value")
+            copy_key_value.setEnabled(bool(key))
+            copy_key_value.triggered.connect(
+                lambda: self._copy_text(f"{key}: {self._value_json(item)}")
+            )
+            copy_node = menu.addAction("Copy Node as JSON")
+            copy_node.triggered.connect(
+                lambda: self._copy_text(self._value_json(item, pretty=True))
+            )
+            menu.addSeparator()
         expand_action = menu.addAction("Expand All")
+        expand_action.triggered.connect(lambda: self.set_expanded_recursively(item, True))
         collapse_action = menu.addAction("Collapse All")
-        chosen = menu.exec(self.viewport().mapToGlobal(pos))
-        if chosen is expand_action:
-            self.set_expanded_recursively(item, True)
-        elif chosen is collapse_action:
-            self.set_expanded_recursively(item, False)
+        collapse_action.triggered.connect(
+            lambda: self.set_expanded_recursively(item, False)
+        )
+        return menu
+
+    # ── Expand / collapse ──
 
     def set_expanded_recursively(self, item: QTreeWidgetItem | None, expanded: bool) -> None:
         """Expand/collapse everything below `item`; the whole tree when clicking empty space."""
