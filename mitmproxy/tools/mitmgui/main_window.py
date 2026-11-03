@@ -287,15 +287,51 @@ def _decode_bytes(content: bytes | None, encoding: str = DEFAULT_ENCODING) -> st
     return content.decode(encoding, errors="replace").replace("\ufffd", "??")
 
 
-def _try_format_json(content: bytes | None) -> str:
+# Bodies are parsed and rendered on the GUI thread, so everything that touches them
+# has to be bounded. These are the limits for the inspector tabs.
+JSON_SNIFF_LIMIT = 1024 * 1024   # probe bodies of unknown type for JSON up to this size
+JSON_NODE_LIMIT = 20_000         # nodes rendered into the JSON tree
+RAW_WARN_SIZE = 1024 * 1024      # 1 MB: ask before putting such a body into the Raw view
+RAW_HIDE_SIZE = 3 * 1024 * 1024  # 3 MB: never put such a body into the Raw view
+_JSON_VALUE_PREVIEW = 500        # characters of a string shown in the JSON tree
+
+
+def _human_mb(size: int) -> str:
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def _looks_like_json(content: bytes | None, content_type: str) -> bool:
+    """Whether the JSON tab should display this body.
+
+    A declared JSON content type is trusted. Anything else is sniffed by looking at the
+    first non-space byte - but only for bodies small enough that a failed json.loads
+    cannot stall the GUI.
+    """
     if not content:
-        return ""
-    try:
-        s = content.decode("utf-8", errors="replace").replace("\ufffd", "??")
-        obj = json_mod.loads(s)
-        return json_mod.dumps(obj, indent=2, ensure_ascii=False)
-    except (json_mod.JSONDecodeError, UnicodeDecodeError):
-        return s
+        return False
+    if "json" in content_type:
+        return True
+    if len(content) > JSON_SNIFF_LIMIT:
+        return False
+    return content[:512].lstrip()[:1] in (b"{", b"[")
+
+
+def _json_value_text(value) -> str:
+    """One-line text for a scalar JSON value."""
+    if isinstance(value, str) and len(value) > _JSON_VALUE_PREVIEW:
+        return (
+            json_mod.dumps(value[:_JSON_VALUE_PREVIEW], ensure_ascii=False)
+            + f" \u2026 ({len(value)} chars)"
+        )
+    return json_mod.dumps(value, ensure_ascii=False)
+
+
+def _json_container_text(value: dict | list) -> str:
+    """Summary shown for an expandable JSON node."""
+    if not value:
+        return "{}" if isinstance(value, dict) else "[]"
+    opening, closing = ("{", "}") if isinstance(value, dict) else ("[", "]")
+    return f"{opening}\u2026{closing}  {len(value)} items"
 
 
 def _try_format_xml(content: bytes | None) -> str:
@@ -1248,6 +1284,99 @@ class _ImageViewWidget(QScrollArea):
             self._label.setText("(failed to decode image)")
 
 
+class _JsonTreeView(QTreeWidget):
+    """Expandable view of a JSON document.
+
+    Rendering stops at JSON_NODE_LIMIT nodes: a document can easily contain hundreds of
+    thousands of values, which would freeze the UI while the tree is being built.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setColumnCount(2)
+        self.setHeaderLabels(["Key", "Value"])
+        self.setAlternatingRowColors(True)
+        # Fixed row heights make building and scrolling large trees much cheaper.
+        self.setUniformRowHeights(True)
+        self.setWordWrap(False)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.header().setStretchLastSection(True)
+        self.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.setColumnWidth(0, 280)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
+        self._nodes = 0
+
+    def show_message(self, text: str) -> None:
+        self.clear()
+        self._nodes = 0
+        self.addTopLevelItem(QTreeWidgetItem(["", text]))
+
+    def set_json(self, document) -> None:
+        """Show `document`, with the outermost node expanded and the rest folded."""
+        self.clear()
+        self._nodes = 0
+        root = self._build_item("", document)
+        if root is not None:
+            self.addTopLevelItem(root)
+            root.setExpanded(True)
+            if self._nodes >= JSON_NODE_LIMIT:
+                self.addTopLevelItem(
+                    QTreeWidgetItem(["", f"(stopped after {JSON_NODE_LIMIT} nodes)"])
+                )
+
+    def _build_item(self, key: str, value) -> QTreeWidgetItem | None:
+        if self._nodes >= JSON_NODE_LIMIT:
+            return None
+        self._nodes += 1
+        if not isinstance(value, (dict, list)):
+            return QTreeWidgetItem([key, _json_value_text(value)])
+        item = QTreeWidgetItem([key, _json_container_text(value)])
+        entries = value.items() if isinstance(value, dict) else enumerate(value)
+        children = []
+        for child_key, child_value in entries:
+            child = self._build_item(
+                str(child_key) if isinstance(value, dict) else f"[{child_key}]",
+                child_value,
+            )
+            if child is None:
+                break
+            children.append(child)
+        if children:
+            item.addChildren(children)
+        return item
+
+    # ── Expand / collapse ──
+
+    def _on_context_menu(self, pos) -> None:
+        item = self.itemAt(pos)
+        menu = QMenu(self)
+        expand_action = menu.addAction("Expand All")
+        collapse_action = menu.addAction("Collapse All")
+        chosen = menu.exec(self.viewport().mapToGlobal(pos))
+        if chosen is expand_action:
+            self.set_expanded_recursively(item, True)
+        elif chosen is collapse_action:
+            self.set_expanded_recursively(item, False)
+
+    def set_expanded_recursively(self, item: QTreeWidgetItem | None, expanded: bool) -> None:
+        """Expand/collapse everything below `item`; the whole tree when clicking empty space."""
+        if item is None:
+            if expanded:
+                self.expandAll()
+            else:
+                self.collapseAll()
+            return
+        item.setExpanded(expanded)
+        stack = [item]
+        while stack:
+            node = stack.pop()
+            for i in range(node.childCount()):
+                child = node.child(i)
+                child.setExpanded(expanded)
+                stack.append(child)
+
+
 class _ParamTable(QTableWidget):
     """Param table whose Ctrl+C copies the selection instead of the current cell.
 
@@ -1704,9 +1833,16 @@ class InspectorPanel(QWidget):
         config = AppConfig()
         self._encoding = config.raw_encoding if config.raw_encoding in ENCODINGS else DEFAULT_ENCODING
         self._text_widgets: dict[str, _ScintillaTextEdit] = {}
+        self._json_tree: _JsonTreeView | None = None
         self._image_widget: _ImageViewWidget | None = None
         self._web_view: QWebEngineView | None = None
         self._webforms_widget: _WebFormsWidget | None = None
+        # Raw tab: the big-body guard replaces the editor with a notice.
+        self._raw_guard: QLabel | None = None
+        self._raw_editor: _ScintillaTextEdit | None = None
+        self._raw_search: _RawSearchBar | None = None
+        self._raw_guard_active = False
+        self._raw_show_big_body = False
         self._previous_tab_index = -1
         # Tabs whose content no longer matches self._current_flow.  They are
         # rendered lazily when the user switches to them, so selecting large
@@ -1735,26 +1871,40 @@ class InspectorPanel(QWidget):
             elif label == "WebForms":
                 self._webforms_widget = _WebFormsWidget()
                 self._tabs.addTab(self._webforms_widget, label)
+            elif label == "JSON":
+                self._json_tree = _JsonTreeView()
+                self._tabs.addTab(self._json_tree, label)
             elif label == "Raw":
                 widget = _ScintillaTextEdit(self)
                 widget.setPlaceholderText(f"Select a session to view {label}")
                 widget._convert_menu_enabled = True
                 self._text_widgets[label] = widget
+                self._raw_editor = widget
+                # Shown instead of the editor when a body is too large to render.
+                self._raw_guard = QLabel()
+                self._raw_guard.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._raw_guard.setWordWrap(True)
+                self._raw_guard.setOpenExternalLinks(False)
+                self._raw_guard.setStyleSheet("color: gray; padding: 24px;")
+                self._raw_guard.linkActivated.connect(self._on_raw_guard_link)
+                self._raw_guard.setVisible(False)
                 # Bottom search bar (keyword / Regex / Find / Count)
                 container = QWidget()
                 box = QVBoxLayout(container)
                 box.setContentsMargins(0, 0, 0, 0)
                 box.setSpacing(0)
+                box.addWidget(self._raw_guard)
                 box.addWidget(widget)
-                box.addWidget(_RawSearchBar(widget))
+                self._raw_search = _RawSearchBar(widget)
+                box.addWidget(self._raw_search)
                 self._tabs.addTab(container, label)
             else:
                 # Text-based inspection tabs use the same themed Scintilla
                 # editor as Raw, including persisted zoom and Word Wrap.
                 widget = _ScintillaTextEdit(self)
                 widget.setPlaceholderText(f"Select a session to view {label}")
-                # "Convert Selection" is offered on the Raw / JSON / XML views.
-                widget._convert_menu_enabled = label in ("JSON", "XML")
+                # "Convert Selection" is offered on the Raw / XML views.
+                widget._convert_menu_enabled = label == "XML"
                 self._tabs.addTab(widget, label)
                 self._text_widgets[label] = widget
 
@@ -1804,7 +1954,11 @@ class InspectorPanel(QWidget):
     def _render_tab(self, tab_name: str) -> None:
         """Render a single content tab from the current flow (lazy path)."""
         self._stale_tabs.discard(tab_name)
-        if tab_name not in self._text_widgets and tab_name not in ("WebView", "ImageView"):
+        if tab_name not in self._text_widgets and tab_name not in (
+            "JSON",
+            "WebView",
+            "ImageView",
+        ):
             return
         if self._panel_type == "request":
             self._render_request_tab(tab_name)
@@ -1833,10 +1987,7 @@ class InspectorPanel(QWidget):
         elif tab_name == "Hex":
             self.set_content("Hex", _format_hex(safe_content))
         elif tab_name == "JSON":
-            if "json" in ct:
-                self.set_content("JSON", _try_format_json(safe_content))
-            else:
-                self.set_content("JSON", "(not JSON content)")
+            self._render_json(safe_content, ct)
         elif tab_name == "XML":
             if "xml" in ct:
                 self.set_content("XML", _try_format_xml(safe_content))
@@ -1858,17 +2009,14 @@ class InspectorPanel(QWidget):
         if tab_name == "Raw":
             # QScintilla preserves the body's original line endings, so no
             # separate display-body bookkeeping is needed anymore.
-            self.set_content("Raw", _format_response_raw(flow, enc))
+            self._set_raw_response(flow, enc)
         elif tab_name == "Headers":
             status_line = f"{resp.http_version} {resp.status_code} {resp.reason}"
             self.set_content("Headers", status_line + "\n" + _format_headers(resp.headers, enc))
         elif tab_name == "Hex":
             self.set_content("Hex", _format_hex(safe_content))
         elif tab_name == "JSON":
-            if "json" in ct:
-                self.set_content("JSON", _try_format_json(safe_content))
-            else:
-                self.set_content("JSON", "(not JSON content)")
+            self._render_json(safe_content, ct)
         elif tab_name == "XML":
             if "xml" in ct:
                 self.set_content("XML", _try_format_xml(safe_content))
@@ -1882,6 +2030,71 @@ class InspectorPanel(QWidget):
                     self._image_widget._label.setText("(not image content)")
         elif tab_name == "WebView":
             self._render_webview()
+
+    def _render_json(self, content: bytes | None, content_type: str) -> None:
+        """Fill the JSON tab.
+
+        The body is shown as JSON whenever it parses as JSON, even if the content type
+        claims something else - the sniffing is bounded by JSON_SNIFF_LIMIT.
+        """
+        if self._json_tree is None:
+            return
+        if not content:
+            self._json_tree.show_message("(empty body)")
+            return
+        if not _looks_like_json(content, content_type):
+            self._json_tree.show_message("(not JSON content)")
+            return
+        try:
+            text = content.decode("utf-8", errors="replace").replace("\ufffd", "??")
+            document = json_mod.loads(text)
+        except (ValueError, RecursionError):
+            self._json_tree.show_message("(not JSON content)")
+            return
+        try:
+            self._json_tree.set_json(document)
+        except RecursionError:
+            self._json_tree.show_message("(nested too deeply to display)")
+
+    def _set_raw_response(self, flow, enc: str) -> None:
+        """Fill the response's Raw tab, holding back bodies that would freeze it."""
+        try:
+            size = len(flow.response.content or b"")
+        except ValueError:
+            size = 0
+        if size > RAW_HIDE_SIZE:
+            self._show_raw_guard(
+                f"Response body is {_human_mb(size)} and is not displayed, "
+                "because rendering it would freeze the view."
+            )
+        elif size > RAW_WARN_SIZE and not self._raw_show_big_body:
+            self._show_raw_guard(
+                f"Response body is {_human_mb(size)}. Displaying it may freeze "
+                f"the view for a while.<br>"
+                '<a href="show">Click here to display it anyway.</a>'
+            )
+        else:
+            self._hide_raw_guard()
+            self.set_content("Raw", _format_response_raw(flow, enc))
+
+    def _show_raw_guard(self, message: str) -> None:
+        self._raw_guard_active = True
+        self._raw_guard.setText(message)
+        self._raw_guard.setVisible(True)
+        self._raw_editor.setVisible(False)
+        self._raw_search.setVisible(False)
+
+    def _hide_raw_guard(self) -> None:
+        self._raw_guard_active = False
+        self._raw_guard.setVisible(False)
+        self._raw_editor.setVisible(True)
+        self._raw_search.setVisible(True)
+
+    def _on_raw_guard_link(self, _target: str) -> None:
+        """The user asked to see a body we held back for performance reasons."""
+        self._raw_show_big_body = True
+        if self._current_flow:
+            self._set_raw_response(self._current_flow, self._encoding)
 
     def _sync_content_length_inspector(self, flow, is_request: bool) -> None:
         """Sync content-length header for inspector panel internal use."""
@@ -1972,7 +2185,8 @@ class InspectorPanel(QWidget):
         if not req:
             self.set_content("Raw", "(no request)")
             self.set_content("Headers", "(no request)")
-            self.set_content("JSON", "")
+            if self._json_tree:
+                self._json_tree.show_message("(no request)")
             self.set_content("XML", "")
             self.set_content("Hex", "")
             if self._webforms_widget:
@@ -2221,7 +2435,8 @@ class InspectorPanel(QWidget):
     def apply_response_edits(self, flow) -> None:
         """Apply user edits from the Raw tab back to the flow's response."""
         raw_text = self._text_widgets.get("Raw")
-        if not raw_text:
+        if not raw_text or self._raw_guard_active:
+            # Nothing was displayed (big-body notice), so there is nothing to apply.
             return
         raw_str = raw_text.toPlainText()
         if not raw_str:
@@ -2299,11 +2514,14 @@ class InspectorPanel(QWidget):
         """
         resp = flow.response
         self._current_flow = flow
+        # A different flow re-arms the big-body notice in the Raw tab.
+        self._raw_show_big_body = False
 
         if not resp:
             self.set_content("Raw", "(waiting for response...)")
             self.set_content("Headers", "(waiting for response...)")
-            self.set_content("JSON", "")
+            if self._json_tree:
+                self._json_tree.show_message("(waiting for response...)")
             self.set_content("XML", "")
             self.set_content("Hex", "")
             if self._image_widget:
