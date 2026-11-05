@@ -49,6 +49,7 @@ from ._http_h2 import H2ConnectionLogger
 from mitmproxy import http
 from mitmproxy import version
 from mitmproxy.connection import Connection
+from mitmproxy.connection import ConnectionState
 from mitmproxy.net.http import status_codes
 from mitmproxy.net.http import url
 from mitmproxy.utils import human
@@ -91,6 +92,8 @@ class Http2Connection(HttpConnection):
         )
         self.h2_conn = BufferedH2Connection(self.h2_conf)
         self.streams = {}
+        self.draining = False
+        """Set once the server sent a GOAWAY: in-flight requests still finish."""
 
     def is_closed(self, stream_id: int) -> bool:
         """Check if a non-idle stream is closed"""
@@ -216,6 +219,7 @@ class Http2Connection(HttpConnection):
             data_to_send = self.h2_conn.data_to_send()
             if data_to_send:
                 yield SendData(self.conn, data_to_send)
+            yield from self.finish_goaway()
 
         elif isinstance(event, ConnectionClosed):
             yield from self.close_connection("peer closed connection")
@@ -276,14 +280,7 @@ class Http2Connection(HttpConnection):
             yield from self.protocol_error(f"HTTP/2 protocol error: {event}")
             return True
         elif isinstance(event, h2.events.ConnectionTerminated):
-            yield from self.close_connection(f"HTTP/2 connection closed: {event!r}")
-            return True
-            # The implementation above isn't really ideal, we should probably only terminate streams > last_stream_id?
-            # We currently lack a mechanism to signal that connections are still active but cannot be reused.
-            # for stream_id in self.streams:
-            #    if stream_id > event.last_stream_id:
-            #        yield ReceiveHttp(self.ReceiveProtocolError(stream_id, f"HTTP/2 connection closed: {event!r}"))
-            #        self.streams.pop(stream_id)
+            return (yield from self.handle_goaway(event))
         elif isinstance(event, h2.events.RemoteSettingsChanged):
             pass
         elif isinstance(event, h2.events.SettingsAcknowledged):
@@ -310,6 +307,53 @@ class Http2Connection(HttpConnection):
         else:
             raise AssertionError(f"Unexpected event: {event!r}")
         return False
+
+    def handle_goaway(
+        self, event: h2.events.ConnectionTerminated
+    ) -> CommandGenerator[bool]:
+        """Deal with a GOAWAY the server sent. Returns True if processing should stop.
+
+        A GOAWAY only forbids *new* streams - requests the server announced as processed
+        (stream id <= last_stream_id) may still receive their response afterwards. That is
+        what a server doing a graceful shutdown does, and browsers happily finish those
+        requests, so only the streams the server did not take are failed here. The
+        responses that follow in the same batch are still processed.
+        """
+        unprocessed = [s for s in self.streams if s > event.last_stream_id]
+        if unprocessed:
+            # The socket close below is asynchronous, so mark the connection unusable
+            # right away: a new request must not be handed this dead HTTP/2 session.
+            self.conn.state &= ~ConnectionState.CAN_WRITE
+        for stream_id in unprocessed:
+            yield ReceiveHttp(
+                self.ReceiveProtocolError(
+                    stream_id,
+                    f"HTTP/2 connection closed: {event!r}",
+                    self.ReceiveProtocolError.code,
+                )
+            )
+            self.streams.pop(stream_id, None)
+
+        if self.streams:
+            self.draining = True
+            if self.ReceiveProtocolError is ResponseProtocolError:
+                yield Log(
+                    f"{human.format_address(self.conn.peername)}: server sent GOAWAY, "
+                    f"finishing {len(self.streams)} in-flight request(s) before closing.",
+                    DEBUG,
+                )
+            # Do not hand this connection out for new requests: a half-closed state makes
+            # HttpLayer.get_connection open a fresh connection instead.
+            self.conn.state &= ~ConnectionState.CAN_WRITE
+            return False
+
+        yield from self.close_connection(f"HTTP/2 connection closed: {event!r}")
+        return True
+
+    def finish_goaway(self) -> CommandGenerator[None]:
+        """Close a connection that is draining because of a GOAWAY once it is idle."""
+        if self.draining and not self.streams:
+            yield from self.close_connection("HTTP/2 connection closed")
 
     def protocol_error(
         self,

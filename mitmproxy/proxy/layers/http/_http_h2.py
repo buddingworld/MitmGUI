@@ -11,6 +11,25 @@ import h2.stream
 
 logger = logging.getLogger(__name__)
 
+# GOAWAY only forbids *new* streams; a server may still send the responses for the
+# requests it announced as processed. hyper-h2 instead marks the connection CLOSED and
+# rejects every frame that follows, which loses those responses (and, for servers that
+# send GOAWAY right before answering, breaks the request entirely). Teach its state
+# machine that frames for existing streams may still arrive after a GOAWAY.
+_AFTER_GOAWAY_INPUTS = (
+    h2.connection.ConnectionInputs.RECV_HEADERS,
+    h2.connection.ConnectionInputs.RECV_DATA,
+    h2.connection.ConnectionInputs.RECV_RST_STREAM,
+    h2.connection.ConnectionInputs.RECV_WINDOW_UPDATE,
+    h2.connection.ConnectionInputs.RECV_PING,
+    h2.connection.ConnectionInputs.RECV_PRIORITY,
+    h2.connection.ConnectionInputs.RECV_SETTINGS,
+)
+for _input in _AFTER_GOAWAY_INPUTS:
+    h2.connection.H2ConnectionStateMachine._transitions[  # type: ignore[attr-defined]
+        (h2.connection.ConnectionState.CLOSED, _input)
+    ] = (None, h2.connection.ConnectionState.CLOSED)
+
 
 class H2ConnectionLogger(h2.config.DummyLogger):
     def __init__(self, peername: tuple, conn_type: str):
