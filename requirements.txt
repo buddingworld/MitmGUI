@@ -1,21 +1,41 @@
-mitmproxy_rs
-pyparsing
-pyopenssl
-brotli
-zstandard
-wsproto
-ruamel.yaml
+# Runtime dependencies for running MitmGui from a clone:
+#     pip install -r requirements.txt
+#
+# This mirrors the dependencies declared in pyproject.toml plus the GUI
+# packages, without repeating their version bounds: the bounds are resolved
+# when installing the package itself, and leaving them out here lets pip pick
+# versions that actually work on your Python.
+
 aioquic
-kaitaistruct
-h2
-pyperclip
-werkzeug
+argon2-cffi
 asgiref
-flask
-ldap3
 bcrypt
-pydivert
-PyQt6
-PyQt6-WebEngine
-PyQt6-QScintilla
+Brotli
+certifi
+cryptography
+flask
+h11
+h2
+hyperframe
+kaitaistruct
+ldap3
+mitmproxy_rs
+msgpack
+publicsuffix2
+pydivert; sys_platform == "win32"
+pyOpenSSL
+pyparsing
+pyperclip
+ruamel.yaml
 sortedcontainers
+tornado
+typing-extensions; python_version < "3.13"
+urwid
+werkzeug
+wsproto
+zstandard
+
+# GUI
+PyQt6
+PyQt6-QScintilla
+PyQt6-WebEngine
