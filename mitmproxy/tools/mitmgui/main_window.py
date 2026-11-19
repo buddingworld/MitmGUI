@@ -81,8 +81,90 @@ from mitmproxy.tools.mitmgui.session_list import SessionTableModel
 from mitmproxy.tools.mitmgui import text_convert
 from mitmproxy.tools.mitmgui.websocket_window import WebSocketWindow
 
-ENCODINGS = ["utf-8", "gbk", "latin-1"]
+#: Choices for the Encoding menus, grouped by language, as (label, codec).
+#: The label is what the menu shows; the codec name is what Python's codecs
+#: module accepts and what gets persisted in the config.
+ENCODING_GROUPS: tuple[tuple[tuple[str, str], ...], ...] = (
+    (
+        ("UTF-8", "utf-8"),
+        ("UTF-16 LE", "utf-16-le"),
+        ("UTF-16 BE", "utf-16-be"),
+    ),
+    (
+        ("GBK (Chinese)", "gbk"),
+        ("GB18030 (Chinese)", "gb18030"),
+        ("Big5 (Traditional Chinese)", "big5"),
+    ),
+    (
+        ("Shift_JIS (Japanese)", "shift_jis"),
+        ("Windows-31J cp932 (Japanese)", "cp932"),
+        ("EUC-JP (Japanese)", "euc-jp"),
+        ("ISO-2022-JP (Japanese)", "iso-2022-jp"),
+    ),
+    (
+        ("EUC-KR (Korean)", "euc-kr"),
+        ("Windows-949 UHC (Korean)", "cp949"),
+    ),
+    (
+        ("Windows-1251 (Russian)", "cp1251"),
+        ("KOI8-R (Russian)", "koi8-r"),
+        ("CP866 (Russian DOS)", "cp866"),
+        ("ISO-8859-5 (Cyrillic)", "iso-8859-5"),
+        ("KOI8-U (Ukrainian)", "koi8-u"),
+    ),
+    (
+        ("Latin-1 ISO-8859-1 (Western)", "latin-1"),
+        ("Windows-1252 (Western)", "cp1252"),
+        ("ISO-8859-15 (Western)", "iso-8859-15"),
+    ),
+    (
+        ("Windows-1250 (Central European)", "cp1250"),
+        ("ISO-8859-2 (Central European)", "iso-8859-2"),
+    ),
+    (
+        ("Windows-1253 (Greek)", "cp1253"),
+        ("ISO-8859-7 (Greek)", "iso-8859-7"),
+    ),
+    (
+        ("Windows-1254 (Turkish)", "cp1254"),
+        ("ISO-8859-9 (Turkish)", "iso-8859-9"),
+    ),
+    (
+        ("Windows-1255 (Hebrew)", "cp1255"),
+        ("ISO-8859-8 (Hebrew)", "iso-8859-8"),
+    ),
+    (
+        ("Windows-1256 (Arabic)", "cp1256"),
+        ("ISO-8859-6 (Arabic)", "iso-8859-6"),
+    ),
+    (
+        ("Windows-1257 (Baltic)", "cp1257"),
+        ("Windows-1258 (Vietnamese)", "cp1258"),
+        ("Windows-874 (Thai)", "cp874"),
+    ),
+)
+
+#: Flat list of the codec names, for membership checks and decoding.
+ENCODINGS = [codec for group in ENCODING_GROUPS for _label, codec in group]
 DEFAULT_ENCODING = "utf-8"
+
+
+def _fill_encoding_menu(menu: QMenu, current: str, on_pick) -> None:
+    """Add an Encoding submenu to ``menu``.
+
+    Choices come from ENCODING_GROUPS, one separator between groups. ``on_pick``
+    receives the codec name, never the display label.
+    """
+    encoding_menu = menu.addMenu("Encoding")
+    for group_index, group in enumerate(ENCODING_GROUPS):
+        if group_index:
+            encoding_menu.addSeparator()
+        for label, enc in group:
+            action = encoding_menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(enc == current)
+            action.triggered.connect(lambda checked, e=enc: on_pick(e))
+
 
 # Themes with a dark chrome; the window frame adapts its colors accordingly
 _DARK_THEMES = {"android", "pyqt_dark"}
@@ -1965,12 +2047,7 @@ class ConvertedTextDialog(QDialog):
 
     def _add_encoding_menu(self, menu: QMenu) -> None:
         """Add the Encoding submenu the Raw view's context menu has."""
-        encoding_menu = menu.addMenu("Encoding")
-        for enc in ENCODINGS:
-            action = encoding_menu.addAction(enc)
-            action.setCheckable(True)
-            action.setChecked(enc == self._encoding)
-            action.triggered.connect(lambda checked, e=enc: self._set_encoding(e))
+        _fill_encoding_menu(menu, self._encoding, self._set_encoding)
 
     def _set_encoding(self, encoding: str) -> None:
         if encoding != self._encoding:
@@ -2316,12 +2393,7 @@ class InspectorPanel(QWidget):
         self._web_view.setHtml(html)
 
     def add_encoding_menu(self, menu: QMenu) -> None:
-        encoding_menu = menu.addMenu("Encoding")
-        for enc in ENCODINGS:
-            action = encoding_menu.addAction(enc)
-            action.setCheckable(True)
-            action.setChecked(enc == self._encoding)
-            action.triggered.connect(lambda checked, e=enc: self._set_encoding(e))
+        _fill_encoding_menu(menu, self._encoding, self._set_encoding)
 
     def _set_encoding(self, encoding: str) -> None:
         if encoding != self._encoding:
@@ -5537,12 +5609,7 @@ class ToolsDialog(QDialog):
     def _add_base64_encoding_menu(self, menu: QMenu) -> None:
         """Encoding submenu (same UX as the Raw tab) for the Base64 tool's
         Plain Text editor."""
-        encoding_menu = menu.addMenu("Encoding")
-        for enc in ENCODINGS:
-            action = encoding_menu.addAction(enc)
-            action.setCheckable(True)
-            action.setChecked(enc == self._base64_text_encoding)
-            action.triggered.connect(lambda checked, e=enc: self._set_base64_encoding(e))
+        _fill_encoding_menu(menu, self._base64_text_encoding, self._set_base64_encoding)
 
     def _set_base64_encoding(self, encoding: str) -> None:
         self._base64_text_encoding = encoding
