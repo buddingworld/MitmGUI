@@ -31,6 +31,36 @@ for _input in _AFTER_GOAWAY_INPUTS:
     ] = (None, h2.connection.ConnectionState.CLOSED)
 
 
+# HTTP/2 forbids whitespace around field values (RFC 9113 section 8.2.1), but
+# browsers trim it and some servers send it anyway (e.g. `age: 1   ` from a CDN
+# cache). hyper-h2's inbound validator rejects such headers and kills the whole
+# connection, so trim SP/HTAB from the values before it runs. The validator is
+# still consulted for everything else: illegal bytes, uppercase names and
+# malformed pseudo-headers are rejected exactly as before.
+#
+# h2.stream imported validate_headers at module load time, so the name has to be
+# patched there rather than in h2.utilities.
+_unpatched_validate_headers = h2.stream.validate_headers
+
+
+def _validate_headers_stripping_ows(headers, header_validation_flags):
+    return _unpatched_validate_headers(
+        (
+            (
+                name,
+                value.strip(b" \t")
+                if isinstance(value, bytes)
+                else value.strip(" \t"),
+            )
+            for name, value in headers
+        ),
+        header_validation_flags,
+    )
+
+
+h2.stream.validate_headers = _validate_headers_stripping_ows
+
+
 class H2ConnectionLogger(h2.config.DummyLogger):
     def __init__(self, peername: tuple, conn_type: str):
         super().__init__()
