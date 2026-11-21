@@ -43,6 +43,9 @@ class SessionTableModel(QAbstractTableModel):
                     return self._flows.index(f) + 1
                 except ValueError:
                     return 0
+            elif col == 6:  # Body: sort by byte count, not the "8.9K" text.
+                body = self._body_size(f)
+                return body[0] if body is not None else -1
             return self._get_column_data(f, col)
 
         if role == Qt.ItemDataRole.DisplayRole:
@@ -109,23 +112,15 @@ class SessionTableModel(QAbstractTableModel):
                 return f.request.method or ""
             return ""
         elif col == 6:  # Body
-            if hasattr(f, "response") and f.response:
-                if f.response.timestamp_end is None:
-                    content_length = f.response.headers.get("content-length")
-                    if content_length is not None:
-                        try:
-                            return f"{self._format_size(int(content_length))}..."
-                        except ValueError:
-                            pass
+            body = self._body_size(f)
+            if body is None:
+                if hasattr(f, "response") and f.response:
                     return "..."
-                # Use strict=False so malformed content-encoding headers (e.g.
-                # a charset like "utf-8" or a non-decodable binary body) don't
-                # raise; we only need the size here.
-                content = f.response.get_content(strict=False)
-                if content is None:
-                    return "..."
-                return self._format_size(len(content))
-            return "-"
+                return "-"
+            size, streaming = body
+            if streaming:
+                return f"{self._format_size(size)}..."
+            return self._format_size(size)
         elif col == 7:  # Content-Type
             if hasattr(f, "response") and f.response:
                 content_type = f.response.headers.get("content-type", "")
@@ -167,6 +162,30 @@ class SessionTableModel(QAbstractTableModel):
                 if str(item.get("type", "")).lower() == "editor":
                     return QColor("#1a66ff")
         return QColor("#808080")
+
+    def _body_size(self, f) -> tuple[int, bool] | None:
+        """The Body column's byte count, and whether the body is still streaming.
+
+        Returns None when the size is unknown: no response yet, or a streaming
+        response without a usable Content-Length.
+        """
+        if not (hasattr(f, "response") and f.response):
+            return None
+        if f.response.timestamp_end is None:
+            content_length = f.response.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    return int(content_length), True
+                except ValueError:
+                    pass
+            return None
+        # Use strict=False so malformed content-encoding headers (e.g. a charset
+        # like "utf-8" or a non-decodable binary body) don't raise; we only need
+        # the size here.
+        content = f.response.get_content(strict=False)
+        if content is None:
+            return None
+        return len(content), False
 
     def _format_size(self, size: int) -> str:
         if size < 1024:
